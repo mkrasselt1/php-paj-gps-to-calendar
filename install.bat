@@ -28,10 +28,12 @@ echo.
 
 REM Composer prüfen
 echo Prüfe Composer...
-composer --version >nul 2>&1
+where composer >nul 2>&1
 if errorlevel 1 (
-    echo Fehler: Composer ist nicht installiert.
+    echo Fehler: Composer ist nicht installiert oder nicht im PATH.
     echo Bitte installieren Sie Composer: https://getcomposer.org/download/
+    echo.
+    echo Alternative: Prüfen Sie ob 'composer.bat' oder 'composer.phar' vorhanden ist
     pause
     exit /b 1
 )
@@ -48,11 +50,31 @@ echo.
 
 REM Composer Dependencies installieren
 echo Installiere PHP Abhängigkeiten...
-composer install --no-dev --optimize-autoloader
+echo Dies kann einige Minuten dauern...
+echo.
+
+REM Verschiedene Composer-Aufrufe versuchen
+composer install --no-dev --optimize-autoloader --no-interaction --verbose
 if errorlevel 1 (
-    echo Fehler beim Installieren der Abhängigkeiten
-    pause
-    exit /b 1
+    echo.
+    echo Composer install fehlgeschlagen. Versuche alternative Methode...
+    
+    REM Versuche mit php composer.phar
+    if exist "composer.phar" (
+        echo Verwende lokale composer.phar...
+        php composer.phar install --no-dev --optimize-autoloader --no-interaction
+    ) else (
+        echo.
+        echo Fehler beim Installieren der Abhängigkeiten.
+        echo.
+        echo Mögliche Lösungen:
+        echo 1. Stellen Sie sicher, dass Composer korrekt installiert ist
+        echo 2. Prüfen Sie Ihre Internetverbindung
+        echo 3. Führen Sie 'composer install' manuell aus
+        echo.
+        pause
+        exit /b 1
+    )
 )
 echo Abhängigkeiten installiert
 echo.
