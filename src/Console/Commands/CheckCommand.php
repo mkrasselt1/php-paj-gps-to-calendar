@@ -71,30 +71,22 @@ class CheckCommand extends Command
             foreach ($vehicles as $vehicle) {
                 $output->writeln(sprintf('Prüfe Fahrzeug: %s', $vehicle['name']));
                 
-                // ✨ ERWEITERTE PAJ-ANALYSE mit detaillierter Stopp-Erkennung
+                // ✨ VEREINFACHTE STANDORT-ANALYSE ohne Motor/Batterie-Komplexität
                 $detailedAnalysis = $pajApi->getDetailedStopAnalysis($vehicle['id'], 30);
                 
-                $engineStatus = $detailedAnalysis['engine_running'] ?? $vehicle['engine_running'] ?? null;
                 $stopDuration = $detailedAnalysis['stop_duration_minutes'] ?? $vehicle['stop_duration_minutes'] ?? 0;
-                $batteryPercent = $detailedAnalysis['current_battery'] ?? $vehicle['battery_percent'] ?? 'unbekannt';
                 $speed = $detailedAnalysis['average_speed'] ?? $vehicle['speed'] ?? 0;
-                $batteryTrend = $detailedAnalysis['battery_trend'] ?? 'unknown';
                 $movementDetected = $detailedAnalysis['movement_detected'] ?? false;
                 
-                $engineIcon = $engineStatus === true ? '🟢' : ($engineStatus === false ? '🔴' : '🟡');
-                $engineText = $engineStatus === true ? 'Motor AN' : ($engineStatus === false ? 'Motor AUS' : 'unbekannt');
-                $batteryIcon = $batteryTrend === 'increasing' ? '📈' : ($batteryTrend === 'decreasing' ? '📉' : '➡️');
-                $movementIcon = $movementDetected ? '🚗' : '🛑';
+                $movementIcon = $movementDetected ? '�' : '�';
+                $speedIcon = $speed > 5 ? '�' : ($speed > 1 ? '�' : '🛑');
                 
                 $output->writeln(sprintf(
-                    '  📊 Status: %s %s | %s %s%% | %s %.1f km/h | ⏱️ %d Min | 📍 %d Pos',
-                    $engineIcon,
-                    $engineText,
-                    $batteryIcon,
-                    $batteryPercent,
-                    $movementIcon,
+                    '  📊 Status: %s %.1f km/h | ⏱️ %d Min gestanden | %s | 📍 %d Positionen',
+                    $speedIcon,
                     $speed,
                     $stopDuration,
+                    $movementDetected ? 'Bewegung erkannt' : 'Keine Bewegung',
                     $detailedAnalysis['position_count'] ?? 0
                 ));
                 
@@ -117,32 +109,31 @@ class CheckCommand extends Command
                         $customer['distance_meters']
                     ));
                     
-                    // ✨ SUPER-INTELLIGENTE BESUCHSERKENNUNG mit PAJ-Daten:
+                    // ✨ VEREINFACHTE BESUCHSERKENNUNG basierend auf Standort und Bewegung:
                     $shouldCreateEntry = false;
                     $reason = '';
                     
-                    // 1. PAJ-basierte Erkennung: Motor definitiv aus + gestanden
-                    if ($engineStatus === false && $stopDuration >= 5) {
+                    // 1. Hauptkriterium: Keine Bewegung + Mindestaufenthaltsdauer
+                    if (!$movementDetected && $stopDuration >= 5 && $speed < 1) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ PAJ: Motor AUS seit %d Min (Batterie: %s)', $stopDuration, $batteryTrend);
+                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, keine Bewegung, 0 km/h', $stopDuration);
                     }
-                    // 2. PAJ-basierte Erkennung: Keine Bewegung + längerer Stopp + fallende Batterie
-                    else if (!$movementDetected && $stopDuration >= 5 && $batteryTrend === 'decreasing') {
+                    // 2. Längerer Stopp auch bei geringer Bewegung (z.B. GPS-Drift)
+                    else if ($stopDuration >= 8 && $speed < 2) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ PAJ: Steht %d Min, Batterie fällt (Motor wahrscheinlich AUS)', $stopDuration);
+                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, minimal bewegt (%.1f km/h)', $stopDuration, $speed);
                     }
-                    // 3. Konservative PAJ-Erkennung: Längerer Stopp ohne Bewegung
-                    else if (!$movementDetected && $stopDuration >= 10 && $speed < 1) {
+                    // 3. Sehr langer Stopp - definitiv ein Besuch
+                    else if ($stopDuration >= 15) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ PAJ: Lange gestanden (%d Min), keine Bewegung', $stopDuration);
+                        $reason = sprintf('✅ Besuch erkannt: Sehr langer Aufenthalt (%d Min)', $stopDuration);
                     }
-                    // 4. Keine PAJ-Kriterien erfüllt - warten
+                    // 4. Kriterien noch nicht erfüllt - warten
                     else {
-                        $reason = sprintf('⏱️ PAJ: Warte noch (%d Min gestanden, Motor %s, Bewegung %s, %d Positionen)', 
+                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden, %.1f km/h, %s', 
                             $stopDuration, 
-                            $engineText,
-                            $movementDetected ? 'erkannt' : 'keine',
-                            $detailedAnalysis['position_count']
+                            $speed,
+                            $movementDetected ? 'Bewegung erkannt' : 'keine Bewegung'
                         );
                     }
                     
