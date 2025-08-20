@@ -1,0 +1,124 @@
+# === PHP PAJ GPS zu Kalender - Git Ignore ===
+
+# === Sensitive Configuration ===
+config/config.yaml
+config/config.yml
+config/local.yaml
+config/local.yml
+config/.env
+config/.env.local
+config/.env.production
+.env
+.env.local
+.env.production
+
+# === Logs & Debug Files ===
+logs/
+*.log
+debug.log
+error.log
+access.log
+var/log/
+storage/logs/
+
+# === Runtime & Cache ===
+var/cache/
+var/sessions/
+cache/
+tmp/
+temp/
+storage/cache/
+storage/framework/cache/
+storage/framework/sessions/
+storage/framework/views/
+
+# === Database & Backup Files ===
+*.sql
+*.dump
+*.backup
+database.sqlite
+database.db
+*.db
+
+# === Vendor Dependencies ===
+/vendor/
+node_modules/
+
+# === IDE & Editor Files ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Composer ===
+composer.phar
+/vendor/
+composer.lock
+
+# === System Files ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# === PHP Specific ===
+*.cache
+*.tmp
+/phpunit.xml
+/phpunit.xml.dist
+/.phpunit.result.cache
+
+# === Project Specific ===
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Test files
+/tests/output/
+/tests/fixtures/
+
+# Documentation build
+/docs/build/
+
+# === PAJ GPS Specific ===
+# API Response Cache (if any)
+api_cache/
+paj_cache/
+
+# Generated calendars for testing
+test_calendar.ics
+generated_events.ics
+
+# CRM analysis exports
+crm_analysis.csv
+customer_export.csv
+gps_analysis.xlsx
+
+# === Security ===
+# Never commit these sensitive files
+secrets.txt
+api_keys.txt
+passwords.txt
+credentials.json
+auth.json
+
+# SSL Certificates
+*.pem
+*.key
+*.crt
+*.p12
+
+# === Development ===
+TODO.md
+NOTES.md
+development.md
+*.todo
+*.notes
+config/config-adressen.yaml

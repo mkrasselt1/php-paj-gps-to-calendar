@@ -1,0 +1,141 @@
+paj_api:
+  email: "your_paj_email@example.com"  # E-Mail-Adresse für PAJ Finder Login
+  password: "your_paj_password"        # Passwort für PAJ Finder
+  base_url: "https://connect.paj-gps.de"  # Offizielle PAJ Connect API URL
+
+# CRM-System Konfiguration
+crm:
+  # Adapter-Typ: mysql, generic, salesforce, hubspot, pipedrive
+  adapter_type: "mysql"
+  
+  # Name des CRM-Systems (für Logs)
+  system_name: "Mein CRM-System"
+  
+  # Datenbankverbindung zum CRM-System (nur Lesezugriff erforderlich)
+  database:
+    driver: "mysql"
+    host: "localhost"
+    port: 3306
+    database: "crm_database"
+    username: "readonly_user"
+    password: "readonly_password"
+  
+  # SQL-Queries für verschiedene Operationen
+  # Diese können an Ihr CRM-System angepasst werden
+  queries:
+    # Kunden in einem Radius finden
+    find_customers_in_radius: |
+      SELECT 
+          id as customer_id,
+          company_name as customer_name,
+          CONCAT(street, ', ', postal_code, ' ', city) as full_address,
+          street,
+          city,
+          postal_code,
+          country,
+          latitude,
+          longitude,
+          phone,
+          email,
+          contact_person,
+          notes
+      FROM customers 
+      WHERE latitude BETWEEN :min_lat AND :max_lat
+      AND longitude BETWEEN :min_lng AND :max_lng
+      AND latitude IS NOT NULL 
+      AND longitude IS NOT NULL
+      AND active = 1
+    
+    # Kunde anhand ID laden
+    get_customer_by_id: |
+      SELECT 
+          id as customer_id,
+          company_name as customer_name,
+          CONCAT(street, ', ', postal_code, ' ', city) as full_address,
+          street,
+          city,
+          postal_code,
+          country,
+          latitude,
+          longitude,
+          phone,
+          email,
+          contact_person,
+          notes
+      FROM customers 
+      WHERE id = :customer_id
+    
+    # Kunden nach Name suchen
+    find_customers_by_name: |
+      SELECT 
+          id as customer_id,
+          company_name as customer_name,
+          CONCAT(street, ', ', postal_code, ' ', city) as full_address,
+          street,
+          city,
+          postal_code,
+          country,
+          latitude,
+          longitude,
+          phone,
+          email,
+          contact_person,
+          notes
+      FROM customers 
+      WHERE company_name LIKE :customer_name
+      AND latitude IS NOT NULL 
+      AND longitude IS NOT NULL
+      AND active = 1
+      ORDER BY company_name
+  
+  # Feldmapping - falls Ihre CRM-Felder andere Namen haben
+  field_mapping:
+    customer_id: "customer_id"
+    customer_name: "customer_name"
+    full_address: "full_address"
+    street: "street"
+    city: "city"
+    postal_code: "postal_code"
+    country: "country"
+    latitude: "latitude"
+    longitude: "longitude"
+    phone: "phone"
+    email: "email"
+    contact_person: "contact_person"
+    notes: "notes"
+
+# Separate kleine Datenbank für Visit-Tracking (optional)
+# Falls nicht konfiguriert, wird nur im Kalender gespeichert
+tracking_database:
+  host: "localhost"
+  port: 3306
+  database: "paj_tracking"
+  username: "tracking_user"
+  password: "tracking_password"
+
+calendar:
+  type: "caldav"  # Unterstützt: caldav, google
+  caldav_url: "https://caldav.your-provider.com/calendars/user/calendar/"
+  username: "your_calendar_user"
+  password: "your_calendar_password"
+  
+  # Für Google Calendar (alternativ zu CalDAV)
+  google_client_id: ""
+  google_client_secret: ""
+  google_refresh_token: ""
+
+settings:
+  # Entfernung in Metern für Nähe-Erkennung
+  proximity_threshold_meters: 500
+  
+  # Zeitraum in Stunden für Duplikat-Prüfung
+  duplicate_check_hours: 24
+  
+  # Log-Level: debug, info, warning, error
+  log_level: "info"
+  
+  # Pfad für Log-Dateien
+  log_file: "logs/application.log"
+  
+  # Zeitzone
+  timezone: "Europe/Berlin"
