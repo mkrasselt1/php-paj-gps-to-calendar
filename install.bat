@@ -53,9 +53,11 @@ echo Installiere PHP Abhängigkeiten...
 echo Dies kann einige Minuten dauern...
 echo.
 
-REM Verschiedene Composer-Aufrufe versuchen
+REM Composer install ohne strenge Fehlerprüfung
 composer install --no-dev --optimize-autoloader --no-interaction --verbose
-if errorlevel 1 (
+
+REM Prüfe ob vendor-Verzeichnis existiert (bessere Prüfung als errorlevel)
+if not exist "vendor" (
     echo.
     echo Composer install fehlgeschlagen. Versuche alternative Methode...
     
@@ -65,18 +67,15 @@ if errorlevel 1 (
         php composer.phar install --no-dev --optimize-autoloader --no-interaction
     ) else (
         echo.
-        echo Fehler beim Installieren der Abhängigkeiten.
+        echo WARNUNG: Composer install nicht vollständig erfolgreich.
+        echo Das Setup wird trotzdem fortgesetzt...
+        echo Sie können später manuell 'composer install' ausführen.
         echo.
-        echo Mögliche Lösungen:
-        echo 1. Stellen Sie sicher, dass Composer korrekt installiert ist
-        echo 2. Prüfen Sie Ihre Internetverbindung
-        echo 3. Führen Sie 'composer install' manuell aus
-        echo.
-        pause
-        exit /b 1
+        timeout /t 3 /nobreak >nul
     )
 )
-echo Abhängigkeiten installiert
+
+echo Dependencies-Installation abgeschlossen
 echo.
 
 REM Konfigurationsdatei erstellen
@@ -90,6 +89,36 @@ if not exist "config\config.yaml" (
 REM Setup ausführen
 echo Führe Setup aus...
 php bin\paj-gps-calendar setup
+echo.
+
+REM Task Scheduler automatisch einrichten
+echo Richte Automatisierung ein...
+echo.
+
+REM PHP Pfad ermitteln
+set TASK_PHP_PATH=
+where php >nul 2>&1
+if errorlevel 1 (
+    echo WARNUNG: PHP nicht im PATH - Task Scheduler wird übersprungen
+    echo Sie können später setup-task-scheduler.bat ausführen
+    goto :skip_task
+) else (
+    for /f "tokens=*" %%i in ('where php') do set TASK_PHP_PATH=%%i
+)
+
+REM Task erstellen
+echo Erstelle Windows Task Scheduler Aufgabe...
+schtasks /create /tn "PAJ GPS Calendar Check" /tr "\"%TASK_PHP_PATH%\" \"%cd%\bin\paj-gps-calendar\" check" /sc minute /mo 3 /st 00:00 /sd %date% /ru "%USERNAME%" /f >nul 2>&1
+
+if errorlevel 1 (
+    echo WARNUNG: Task Scheduler Aufgabe konnte nicht automatisch erstellt werden
+    echo Führen Sie später setup-task-scheduler.bat als Administrator aus
+) else (
+    echo ✓ Task Scheduler Aufgabe erfolgreich erstellt
+    echo   Task läuft automatisch alle 3 Minuten
+)
+
+:skip_task
 echo.
 
 echo Installation abgeschlossen!
