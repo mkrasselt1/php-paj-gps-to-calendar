@@ -126,8 +126,10 @@ echo.
 echo Nächste Schritte:
 echo 1. Bearbeiten Sie config\config.yaml mit Ihren Zugangsdaten
 echo 2. Testen Sie das System: php bin\paj-gps-calendar check --dry-run
-echo 3. Richten Sie eine geplante Aufgabe ein für automatische Ausführung
+echo 3. Das System läuft automatisch alle 3 Minuten (Task Scheduler)
 echo.
+echo Task Status prüfen: schtasks /query /tn "PAJ GPS Calendar Check"
+echo Logs anzeigen: type logs\application.log
 echo Hilfe: php bin\paj-gps-calendar --help
 echo.
 pause
