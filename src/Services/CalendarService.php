@@ -102,8 +102,8 @@ class CalendarService
     private function generateEventId(array $vehicle, array $location): string
     {
         $timestamp = date('YmdHis');
-        $vehicleId = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id']);
-        $locationId = $location['id'];
+        $vehicleId = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id'] ?? 'unknown');
+        $locationId = $location['customer_id'] ?? 'unknown';
         
         return "paj-gps-{$vehicleId}-{$locationId}-{$timestamp}";
     }
@@ -145,7 +145,7 @@ class CalendarService
         $ical .= "DTEND;TZID={$timezone}:" . $eventEnd->format('Ymd\THis') . "\r\n";
         $ical .= "SUMMARY:{$summary}\r\n";
         $ical .= "DESCRIPTION:{$description}\r\n";
-        $ical .= "LOCATION:{$location['address']}\r\n";
+        $ical .= "LOCATION:" . ($location['full_address'] ?? 'Adresse unbekannt') . "\r\n";
         $ical .= "CATEGORIES:PAJ-GPS,Fahrzeugverfolgung\r\n";
         $ical .= "STATUS:CONFIRMED\r\n";
         $ical .= "TRANSP:TRANSPARENT\r\n";
@@ -162,7 +162,7 @@ class CalendarService
         // Fahrzeug-Informationen
         $description .= "FAHRZEUG:\\n";
         $description .= "- Name: {$vehicle['name']}\\n";
-        $description .= "- ID: {$vehicle['id']}\\n";
+        $description .= "- ID: " . ($vehicle['id'] ?? 'unbekannt') . "\\n";
         $description .= "- Entfernung zum Kunden: " . round($distance) . " Meter\\n";
         
         if (isset($vehicle['speed'])) {
@@ -183,7 +183,7 @@ class CalendarService
             $description .= "- Kundennummer: {$location['customer_id']}\\n";
         }
         
-        $description .= "- Adresse: {$location['full_address']}\\n";
+        $description .= "- Adresse: " . ($location['full_address'] ?? 'Adresse unbekannt') . "\\n";
         
         if (!empty($location['contact_person'])) {
             $description .= "- Ansprechpartner: {$location['contact_person']}\\n";
