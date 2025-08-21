@@ -507,116 +507,700 @@ class PajApiService
     }
 
     /**
-     * Analysiert Bewegungsmuster basierend auf PAJ Tracking-Daten
+     * Holt historische Tracking-Daten für ein Fahrzeug
+     */
+    public function getHistoricalTrackingData(string $deviceId, int $dateStart, int $dateEnd, bool $includeGps = true, bool $includeWifi = false, string $sort = 'desc'): array
+    {
+        try {
+            if (!$this->accessToken) {
+                if (!$this->authenticate()) {
+                    throw new \Exception('PAJ API Authentifizierung fehlgeschlagen');
+                }
+            }
+
+            $response = $this->httpClient->get("/api/v1/trackerdata/{$deviceId}/date_range", [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $this->accessToken,
+                    'Content-Type' => 'application/json',
+                ],
+                'query' => [
+                    'dateStart' => (string)$dateStart,
+                    'dateEnd' => (string)$dateEnd,
+                    'gps' => $includeGps ? '1' : '0',
+                    'wifi' => $includeWifi ? '1' : '0',
+                    'sort' => $sort
+                ]
+            ]);
+
+            $data = json_decode($response->getBody()->getContents(), true);
+            
+            if (isset($data['success'])) {
+                $this->logger->info('Historische Tracking-Daten abgerufen', [
+                    'device_id' => $deviceId,
+                    'date_start' => date('Y-m-d H:i:s', $dateStart),
+                    'date_end' => date('Y-m-d H:i:s', $dateEnd),
+                    'data_points' => count($data['success'])
+                ]);
+                
+                return $data['success'];
+            }
+            
+            throw new \Exception('Keine historischen Daten erhalten: ' . json_encode($data));
+            
+        } catch (\Exception $e) {
+            $this->logger->error('Fehler beim Abrufen historischer Tracking-Daten', [
+                'device_id' => $deviceId,
+                'error' => $e->getMessage()
+            ]);
+            return [];
+        }
+    }
+
+    /**
+     * Analysiert historische Daten um Besuche zu identifizieren - basiert auf Zeitlücken zwischen GPS-Punkten
+     */
+    public function analyzeHistoricalVisits(string $deviceId, int $dateStart, int $dateEnd, int $minimumStopDurationMinutes = 2): array
+    {
+        $this->logger->info('Starte historische Besuchsanalyse (Zeitlücken-basiert)', [
+            'device_id' => $deviceId,
+            'date_start' => date('Y-m-d H:i:s', $dateStart),
+            'date_end' => date('Y-m-d H:i:s', $dateEnd),
+            'minimum_stop_duration_minutes' => $minimumStopDurationMinutes
+        ]);
+        
+        $trackingData = $this->getHistoricalTrackingData($deviceId, $dateStart, $dateEnd, true, false, 'asc');
+        
+        $this->logger->info('Historische Tracking-Daten geladen', [
+            'device_id' => $deviceId,
+            'data_points' => count($trackingData)
+        ]);
+        
+        if (empty($trackingData)) {
+            $this->logger->warning('Keine historischen Tracking-Daten gefunden', [
+                'device_id' => $deviceId,
+                'date_range' => date('Y-m-d', $dateStart) . ' bis ' . date('Y-m-d', $dateEnd)
+            ]);
+            return [];
+        }
+        
+        // Sortiere nach Zeitstempel (aufsteigend)
+        usort($trackingData, function($a, $b) {
+            return ($a['dateunix'] ?? 0) <=> ($b['dateunix'] ?? 0);
+        });
+        
+        $visits = [];
+        $normalIntervalSeconds = 60; // PAJ sendet normalerweise alle 60 Sekunden
+        $maxNormalGap = $normalIntervalSeconds * 2; // 2 Minuten = normale Toleranz
+        $debugCount = 0;
+        
+        $this->logger->debug('Beginne Zeitlücken-Analyse', [
+            'device_id' => $deviceId,
+            'total_points' => count($trackingData),
+            'normal_interval_seconds' => $normalIntervalSeconds,
+            'max_normal_gap_seconds' => $maxNormalGap
+        ]);
+        
+        // Debug: Schaue dir die ersten paar Datenpunkte an
+        for ($j = 0; $j < min(5, count($trackingData)); $j++) {
+            $point = $trackingData[$j];
+            $this->logger->debug('Rohdaten-Beispiel', [
+                'index' => $j,
+                'timestamp' => $point['dateunix'] ?? 'null',
+                'latitude' => $point['lat'] ?? 'null',
+                'longitude' => $point['lng'] ?? 'null',
+                'speed' => $point['speed'] ?? 'null',
+                'formatted_time' => isset($point['dateunix']) ? date('Y-m-d H:i:s', $point['dateunix']) : 'null',
+                'raw_point' => array_slice($point, 0, 5) // Nur die ersten 5 Felder zeigen
+            ]);
+        }
+        
+        for ($i = 1; $i < count($trackingData); $i++) {
+            $prevPoint = $trackingData[$i - 1];
+            $currentPoint = $trackingData[$i];
+            
+            $prevTimestamp = $prevPoint['dateunix'] ?? 0;
+            $currentTimestamp = $currentPoint['dateunix'] ?? 0;
+            $prevLat = (float)($prevPoint['lat'] ?? 0);
+            $prevLon = (float)($prevPoint['lng'] ?? 0);
+            $currentLat = (float)($currentPoint['lat'] ?? 0);
+            $currentLon = (float)($currentPoint['lng'] ?? 0);
+            
+            // Überspringe ungültige Datenpunkte
+            if ($prevLat == 0 || $prevLon == 0 || $currentLat == 0 || $currentLon == 0) {
+                continue;
+            }
+            
+            $timeDifference = $currentTimestamp - $prevTimestamp;
+            
+            // Debug: Zeige ein paar Beispiele der Zeitintervalle
+            if ($debugCount < 10) {
+                $this->logger->debug('Zeitintervall-Beispiel', [
+                    'point_index' => $i,
+                    'time_difference_seconds' => $timeDifference,
+                    'time_difference_minutes' => round($timeDifference / 60, 1),
+                    'prev_time' => date('H:i:s', $prevTimestamp),
+                    'current_time' => date('H:i:s', $currentTimestamp)
+                ]);
+                $debugCount++;
+            }
+            
+            // Erkenne Zeitlücke = Fahrzeug war längere Zeit an einer Position
+            if ($timeDifference > $maxNormalGap) {
+                $stopDurationMinutes = $timeDifference / 60;
+                
+                // Prüfe ob die Stopp-Dauer lang genug ist
+                if ($stopDurationMinutes >= $minimumStopDurationMinutes) {
+                    // Berechne durchschnittliche Position während des Stopps
+                    $avgLat = ($prevLat + $currentLat) / 2;
+                    $avgLon = ($prevLon + $currentLon) / 2;
+                    
+                    // Prüfe ob es wirklich ein Stopp war (Position nicht stark verändert)
+                    $distance = $this->calculateDistance($prevLat, $prevLon, $currentLat, $currentLon);
+                    
+                    // Wenn sich das Fahrzeug weniger als 200m bewegt hat = Stopp
+                    if ($distance < 200) {
+                        $visits[] = [
+                            'device_id' => $deviceId,
+                            'start_time' => $prevTimestamp,
+                            'end_time' => $currentTimestamp,
+                            'duration_minutes' => round($stopDurationMinutes, 1),
+                            'latitude' => $avgLat,
+                            'longitude' => $avgLon,
+                            'start_time_formatted' => date('d.m.Y H:i', $prevTimestamp),
+                            'end_time_formatted' => date('d.m.Y H:i', $currentTimestamp),
+                            'detection_method' => 'time_gap',
+                            'time_gap_seconds' => $timeDifference,
+                            'position_drift_meters' => round($distance, 1),
+                            'data_points_gap' => $i
+                        ];
+                        
+                        $this->logger->debug('Zeitlücken-Besuch erkannt', [
+                            'device_id' => $deviceId,
+                            'duration_minutes' => round($stopDurationMinutes, 1),
+                            'time_gap_seconds' => $timeDifference,
+                            'position_drift_meters' => round($distance, 1),
+                            'start_time' => date('d.m.Y H:i', $prevTimestamp)
+                        ]);
+                    } else {
+                        $this->logger->debug('Zeitlücke übersprungen - zu viel Bewegung', [
+                            'device_id' => $deviceId,
+                            'duration_minutes' => round($stopDurationMinutes, 1),
+                            'position_drift_meters' => round($distance, 1),
+                            'threshold_meters' => 200
+                        ]);
+                    }
+                }
+            }
+        }
+        
+        // Zusätzlich: Erkenne Cluster von GPS-Punkten mit ähnlicher Position
+        $clusterVisits = $this->findPositionClusters($trackingData, $minimumStopDurationMinutes, $deviceId);
+        
+        // KORREKTUR: Verwende nur Cluster-Methode, nicht die fehlerhafte Zeitlücken-Methode
+        // NEUE METHODE: Linearer Ansatz (viel einfacher und robuster)
+        $linearVisits = $this->findVisitsLinear($trackingData, $minimumStopDurationMinutes, $deviceId);
+        
+        $this->logger->info('Verwende neuen linearen Ansatz (Cluster-Methode deaktiviert)', [
+            'time_gap_visits_ignored' => count($visits),
+            'cluster_visits_ignored' => count($clusterVisits),
+            'linear_visits_used' => count($linearVisits)
+        ]);
+        
+        // Nur lineare Besuche verwenden
+        $uniqueVisits = $linearVisits;
+        
+        $this->logger->info('Historische Besuchsanalyse abgeschlossen', [
+            'device_id' => $deviceId,
+            'time_gap_visits' => count($visits),
+            'cluster_visits' => count($clusterVisits),
+            'total_unique_visits' => count($uniqueVisits),
+            'date_range' => date('Y-m-d', $dateStart) . ' bis ' . date('Y-m-d', $dateEnd)
+        ]);
+        
+        return $uniqueVisits;
+    }
+    
+    /**
+     * Analysiert Bewegungsmuster in GPS-Daten
      */
     private function analyzeMovementPattern(array $positions): array
     {
         if (empty($positions)) {
             return [
-                'is_stopped' => false,
-                'stop_duration_minutes' => 0,
-                'engine_running' => null,
+                'pattern_type' => 'unknown',
                 'movement_detected' => false,
                 'battery_trend' => 'unknown',
                 'position_count' => 0
             ];
         }
-
-        $positionCount = count($positions);
-        $latestPosition = $positions[0]; // Neueste Position zuerst
-        $oldestPosition = $positions[$positionCount - 1];
-
-        // Bewegungsanalyse
-        $totalMovement = 0;
-        $speedValues = [];
-        $batteryValues = [];
-        $stopStartTime = null;
-
-        for ($i = 0; $i < $positionCount - 1; $i++) {
-            $pos1 = $positions[$i];
-            $pos2 = $positions[$i + 1];
-            
-            // GPS-Distanz berechnen (einfache Approximation)
-            $latDiff = abs($pos1['lat'] - $pos2['lat']);
-            $lngDiff = abs($pos1['lng'] - $pos2['lng']);
-            $distance = sqrt($latDiff * $latDiff + $lngDiff * $lngDiff) * 111000; // Ungefähr in Metern
-            
-            $totalMovement += $distance;
-            
-            if (isset($pos1['speed'])) {
-                $speedValues[] = $pos1['speed'];
-            }
-            if (isset($pos1['battery'])) {
-                $batteryValues[] = $pos1['battery'];
-            }
-            
-            // Finde Stopp-Beginn
-            if (($pos1['speed'] ?? 0) < 2 && $stopStartTime === null) {
-                $stopStartTime = $pos1['dateunix'] ?? null;
-            }
-        }
-
-        // Stopp-Dauer berechnen
-        $currentTime = time();
-        $stopDurationMinutes = 0;
-        if ($stopStartTime && ($latestPosition['speed'] ?? 0) < 2) {
-            $stopDurationMinutes = max(0, round(($currentTime - $stopStartTime) / 60));
-        }
-
-        // Bewegung erkannt?
-        $movementDetected = $totalMovement > 50; // Mehr als 50m Bewegung
-        $isStopped = !$movementDetected && (($latestPosition['speed'] ?? 0) < 2);
-
-        // Motor-Status ableiten
-        $avgSpeed = !empty($speedValues) ? array_sum($speedValues) / count($speedValues) : 0;
-        $currentBattery = $latestPosition['battery'] ?? null;
-        $batteryTrend = $this->analyzeBatteryTrend($batteryValues);
         
-        $engineRunning = null;
-        if ($avgSpeed > 5) {
-            $engineRunning = true;
-        } elseif ($isStopped && $currentBattery !== null) {
-            if ($batteryTrend === 'increasing' || $currentBattery > 85) {
-                $engineRunning = true; // Motor läuft, lädt Batterie
-            } elseif ($batteryTrend === 'decreasing' && $currentBattery < 60) {
-                $engineRunning = false; // Motor aus, Batterie entlädt sich
+        $positionCount = count($positions);
+        $movementDetected = false;
+        $totalDistance = 0;
+        $avgSpeed = 0;
+        
+        // Berechne Gesamtstrecke und Geschwindigkeiten
+        for ($i = 1; $i < $positionCount; $i++) {
+            $prev = $positions[$i - 1];
+            $curr = $positions[$i];
+            
+            $distance = $this->calculateDistance(
+                $prev['latitude'], $prev['longitude'],
+                $curr['latitude'], $curr['longitude']
+            );
+            
+            $totalDistance += $distance;
+            
+            if ($distance > 10) { // Mehr als 10 Meter Bewegung
+                $movementDetected = true;
             }
         }
-
+        
+        // Durchschnittsgeschwindigkeit berechnen
+        if ($positionCount > 1) {
+            $timeSpan = $positions[$positionCount - 1]['timestamp'] - $positions[0]['timestamp'];
+            if ($timeSpan > 0) {
+                $avgSpeed = ($totalDistance / 1000) / ($timeSpan / 3600); // km/h
+            }
+        }
+        
+        // Bewegungsmuster klassifizieren
+        $patternType = 'stationary';
+        if ($avgSpeed > 5) {
+            $patternType = 'moving';
+        } elseif ($avgSpeed > 1) {
+            $patternType = 'slow_movement';
+        }
+        
+        // Batterie-Trend (vereinfacht)
+        $batteryTrend = 'stable';
+        if ($positionCount > 2) {
+            $firstBattery = $positions[0]['battery'] ?? 100;
+            $lastBattery = $positions[$positionCount - 1]['battery'] ?? 100;
+            
+            if ($lastBattery < $firstBattery - 5) {
+                $batteryTrend = 'declining';
+            } elseif ($lastBattery > $firstBattery + 5) {
+                $batteryTrend = 'charging';
+            }
+        }
+        
         return [
-            'is_stopped' => $isStopped,
-            'stop_duration_minutes' => $stopDurationMinutes,
-            'engine_running' => $engineRunning,
+            'pattern_type' => $patternType,
             'movement_detected' => $movementDetected,
             'battery_trend' => $batteryTrend,
             'position_count' => $positionCount,
-            'total_movement_meters' => round($totalMovement, 2),
-            'average_speed' => round($avgSpeed, 1),
-            'current_battery' => $currentBattery
+            'total_distance_meters' => round($totalDistance),
+            'avg_speed_kmh' => round($avgSpeed, 2)
         ];
     }
-
+    
     /**
-     * Analysiert Batterie-Trend (steigend/fallend)
+     * Berechnet die Entfernung zwischen zwei GPS-Koordinaten in Metern
      */
-    private function analyzeBatteryTrend(array $batteryValues): string
+    private function calculateDistance(float $lat1, float $lon1, float $lat2, float $lon2): float
     {
-        if (count($batteryValues) < 3) {
-            return 'unknown';
+        $earthRadius = 6371000; // Erdradius in Metern
+        
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLon = deg2rad($lon2 - $lon1);
+        
+        $a = sin($dLat / 2) * sin($dLat / 2) +
+             cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+             sin($dLon / 2) * sin($dLon / 2);
+        
+        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+        
+        return $earthRadius * $c;
+    }
+    
+    /**
+     * Findet Positionscluster in GPS-Daten (korrigierte Methode mit Zeitbasierte Trennung und Cluster-Verschmelzung)
+     */
+    private function findPositionClusters(array $trackingData, int $minimumStopDurationMinutes, string $deviceId): array
+    {
+        $visits = [];
+        $clusterRadius = 50; // 50 Meter Radius für Position-Cluster
+        $maxTimeGapMinutes = 120; // 2 Stunden max Zeitlücke im Cluster
+        $clusters = [];
+        
+        foreach ($trackingData as $point) {
+            $timestamp = $point['dateunix'] ?? 0;
+            $latitude = (float)($point['lat'] ?? 0);
+            $longitude = (float)($point['lng'] ?? 0);
+            
+            if ($latitude == 0 || $longitude == 0) {
+                continue;
+            }
+            
+            // Finde passenden Cluster oder erstelle neuen
+            $foundCluster = false;
+            foreach ($clusters as &$cluster) {
+                $distance = $this->calculateDistance(
+                    $cluster['center_lat'], $cluster['center_lon'],
+                    $latitude, $longitude
+                );
+                
+                // KORREKTUR: Prüfe auch Zeitabstand zum letzten Punkt im Cluster
+                $timeSinceLastPoint = ($timestamp - $cluster['end_time']) / 60; // in Minuten
+                
+                if ($distance <= $clusterRadius && $timeSinceLastPoint <= $maxTimeGapMinutes) {
+                    // Punkt gehört zu diesem Cluster (räumlich UND zeitlich nah)
+                    $cluster['points'][] = $point;
+                    $cluster['end_time'] = max($cluster['end_time'], $timestamp);
+                    $cluster['start_time'] = min($cluster['start_time'], $timestamp);
+                    
+                    // Aktualisiere Cluster-Zentrum basierend auf allen Punkten
+                    $totalLat = 0;
+                    $totalLon = 0;
+                    foreach ($cluster['points'] as $clusterPoint) {
+                        $totalLat += (float)($clusterPoint['lat'] ?? 0);
+                        $totalLon += (float)($clusterPoint['lng'] ?? 0);
+                    }
+                    $cluster['center_lat'] = $totalLat / count($cluster['points']);
+                    $cluster['center_lon'] = $totalLon / count($cluster['points']);
+                    
+                    $foundCluster = true;
+                    break;
+                }
+            }
+            
+            if (!$foundCluster) {
+                // Neuer Cluster (entweder räumlich oder zeitlich getrennt)
+                $clusters[] = [
+                    'center_lat' => $latitude,
+                    'center_lon' => $longitude,
+                    'start_time' => $timestamp,
+                    'end_time' => $timestamp,
+                    'points' => [$point]
+                ];
+            }
         }
-
-        $first = array_slice($batteryValues, 0, 3);
-        $last = array_slice($batteryValues, -3);
         
-        $firstAvg = array_sum($first) / count($first);
-        $lastAvg = array_sum($last) / count($last);
+        // NEUE FUNKTION: Verschmelze überlappende Cluster
+        $this->logger->debug('Cluster vor Verschmelzung', [
+            'cluster_count' => count($clusters),
+            'device_id' => $deviceId
+        ]);
         
-        if ($lastAvg > $firstAvg + 2) {
-            return 'increasing';
-        } elseif ($lastAvg < $firstAvg - 2) {
-            return 'decreasing';
+        $mergedClusters = $this->mergeOverlappingClusters($clusters, $clusterRadius * 1.5); // 75m für Verschmelzung
+        
+        $this->logger->debug('Cluster nach Verschmelzung', [
+            'original_count' => count($clusters),
+            'merged_count' => count($mergedClusters),
+            'device_id' => $deviceId
+        ]);
+        
+        // Analysiere verschmolzene Cluster auf Besuche
+        foreach ($mergedClusters as $cluster) {
+            $durationMinutes = ($cluster['end_time'] - $cluster['start_time']) / 60;
+            
+            if ($durationMinutes >= $minimumStopDurationMinutes && count($cluster['points']) >= 3) {
+                // Verwende bereits berechnetes Zentrum
+                $visits[] = [
+                    'device_id' => $deviceId,
+                    'start_time' => $cluster['start_time'],
+                    'end_time' => $cluster['end_time'],
+                    'duration_minutes' => round($durationMinutes, 1),
+                    'latitude' => $cluster['center_lat'],
+                    'longitude' => $cluster['center_lon'],
+                    'start_time_formatted' => date('d.m.Y H:i', $cluster['start_time']),
+                    'end_time_formatted' => date('d.m.Y H:i', $cluster['end_time']),
+                    'detection_method' => 'position_cluster_merged',
+                    'cluster_points' => count($cluster['points']),
+                    'cluster_radius_meters' => $clusterRadius,
+                    'max_time_gap_minutes' => $maxTimeGapMinutes,
+                    'merged_from_clusters' => isset($cluster['merged_count']) ? $cluster['merged_count'] : 1
+                ];
+            }
         }
         
-        return 'stable';
+        return $visits;
+    }
+    
+    /**
+     * Verschmelzt überlappende Cluster zu einzelnen Besuchen
+     */
+    private function mergeOverlappingClusters(array $clusters, float $mergeRadius): array
+    {
+        $this->logger->debug('Starte Cluster-Verschmelzung', [
+            'input_clusters' => count($clusters),
+            'merge_radius' => $mergeRadius
+        ]);
+        
+        $merged = [];
+        $used = [];
+        
+        foreach ($clusters as $i => $cluster) {
+            if (isset($used[$i])) {
+                continue; // Cluster bereits verwendet
+            }
+            
+            $mergedCluster = $cluster;
+            $mergedCluster['merged_count'] = 1;
+            $used[$i] = true;
+            
+            $this->logger->debug('Prüfe Cluster für Verschmelzung', [
+                'cluster_index' => $i,
+                'center_lat' => $cluster['center_lat'],
+                'center_lon' => $cluster['center_lon'],
+                'start_time' => date('H:i', $cluster['start_time']),
+                'end_time' => date('H:i', $cluster['end_time'])
+            ]);
+            
+            // Finde alle überlappenden Cluster
+            foreach ($clusters as $j => $otherCluster) {
+                if ($i === $j || isset($used[$j])) {
+                    continue;
+                }
+                
+                $distance = $this->calculateDistance(
+                    $cluster['center_lat'], $cluster['center_lon'],
+                    $otherCluster['center_lat'], $otherCluster['center_lon']
+                );
+                
+                // Prüfe zeitliche Überlappung oder direkte Nachbarschaft (max 30 Min Lücke)
+                $timeGap = min(
+                    abs($cluster['start_time'] - $otherCluster['end_time']),
+                    abs($otherCluster['start_time'] - $cluster['end_time'])
+                ) / 60; // Minuten
+                
+                $timeOverlap = !(
+                    $cluster['end_time'] < $otherCluster['start_time'] || 
+                    $otherCluster['end_time'] < $cluster['start_time']
+                );
+                
+                $this->logger->debug('Prüfe Cluster-Nachbarn', [
+                    'cluster_a' => $i,
+                    'cluster_b' => $j,
+                    'distance' => round($distance, 1),
+                    'time_gap_minutes' => round($timeGap, 1),
+                    'time_overlap' => $timeOverlap,
+                    'merge_radius' => $mergeRadius,
+                    'should_merge' => ($distance <= $mergeRadius && ($timeOverlap || $timeGap <= 30))
+                ]);
+                
+                if ($distance <= $mergeRadius && ($timeOverlap || $timeGap <= 30)) {
+                    // Cluster verschmelzen
+                    $this->logger->debug('Verschmelze Cluster', [
+                        'cluster_a' => $i,
+                        'cluster_b' => $j,
+                        'distance' => round($distance, 1),
+                        'time_gap' => round($timeGap, 1)
+                    ]);
+                    
+                    $mergedCluster['points'] = array_merge($mergedCluster['points'], $otherCluster['points']);
+                    $mergedCluster['start_time'] = min($mergedCluster['start_time'], $otherCluster['start_time']);
+                    $mergedCluster['end_time'] = max($mergedCluster['end_time'], $otherCluster['end_time']);
+                    $mergedCluster['merged_count']++;
+                    
+                    // Neues Zentrum berechnen
+                    $totalLat = 0;
+                    $totalLon = 0;
+                    foreach ($mergedCluster['points'] as $point) {
+                        $totalLat += (float)($point['lat'] ?? 0);
+                        $totalLon += (float)($point['lng'] ?? 0);
+                    }
+                    $mergedCluster['center_lat'] = $totalLat / count($mergedCluster['points']);
+                    $mergedCluster['center_lon'] = $totalLon / count($mergedCluster['points']);
+                    
+                    $used[$j] = true;
+                }
+            }
+            
+            $merged[] = $mergedCluster;
+        }
+        
+        $this->logger->debug('Cluster-Verschmelzung abgeschlossen', [
+            'input_clusters' => count($clusters),
+            'output_clusters' => count($merged),
+            'reduction' => count($clusters) - count($merged)
+        ]);
+        
+        return $merged;
+    }
+    
+    /**
+     * 🚀 NEUE EINFACHE METHODE: Lineare Besuchserkennung (ohne komplexes Clustering)
+     */
+    private function findVisitsLinear(array $trackingData, int $minimumStopDurationMinutes, string $deviceId): array
+    {
+        $this->logger->info('Starte lineare Besuchsanalyse (einfacher Ansatz)', [
+            'device_id' => $deviceId,
+            'data_points' => count($trackingData),
+            'minimum_duration_minutes' => $minimumStopDurationMinutes
+        ]);
+        
+        if (empty($trackingData)) {
+            return [];
+        }
+        
+        // Sortiere nach Zeitstempel
+        usort($trackingData, function($a, $b) {
+            return ($a['dateunix'] ?? 0) <=> ($b['dateunix'] ?? 0);
+        });
+        
+        $visits = [];
+        $currentStay = null;
+        $maxMovementRadius = 75; // 75 Meter = als "am gleichen Ort" betrachtet
+        $maxSpeedKmh = 5; // Unter 5 km/h = Stillstand
+        
+        foreach ($trackingData as $point) {
+            $timestamp = $point['dateunix'] ?? 0;
+            $latitude = (float)($point['lat'] ?? 0);
+            $longitude = (float)($point['lng'] ?? 0);
+            $speed = (float)($point['speed'] ?? 0);
+            
+            if ($latitude == 0 || $longitude == 0) {
+                continue;
+            }
+            
+            // Ist das Fahrzeug in Bewegung?
+            $isMoving = $speed > $maxSpeedKmh;
+            
+            if ($currentStay === null) {
+                // Ersten Aufenthalt starten (wenn nicht in Bewegung)
+                if (!$isMoving) {
+                    $currentStay = [
+                        'start_time' => $timestamp,
+                        'end_time' => $timestamp,
+                        'points' => [$point],
+                        'center_lat' => $latitude,
+                        'center_lon' => $longitude
+                    ];
+                }
+            } else {
+                // Prüfe ob Punkt zum aktuellen Aufenthalt gehört
+                $distance = $this->calculateDistance(
+                    $currentStay['center_lat'], $currentStay['center_lon'],
+                    $latitude, $longitude
+                );
+                
+                $timeGapMinutes = ($timestamp - $currentStay['end_time']) / 60;
+                
+                if (!$isMoving && $distance <= $maxMovementRadius && $timeGapMinutes <= 60) {
+                    // Punkt gehört zum aktuellen Aufenthalt
+                    $currentStay['end_time'] = $timestamp;
+                    $currentStay['points'][] = $point;
+                    
+                    // Zentrum neu berechnen (gewichteter Durchschnitt)
+                    $totalLat = 0;
+                    $totalLon = 0;
+                    foreach ($currentStay['points'] as $stayPoint) {
+                        $totalLat += (float)($stayPoint['lat'] ?? 0);
+                        $totalLon += (float)($stayPoint['lng'] ?? 0);
+                    }
+                    $currentStay['center_lat'] = $totalLat / count($currentStay['points']);
+                    $currentStay['center_lon'] = $totalLon / count($currentStay['points']);
+                } else {
+                    // Aufenthalt beendet - Prüfe ob lang genug für Besuch
+                    $durationMinutes = ($currentStay['end_time'] - $currentStay['start_time']) / 60;
+                    
+                    if ($durationMinutes >= $minimumStopDurationMinutes) {
+                        $visits[] = [
+                            'device_id' => $deviceId,
+                            'start_time' => $currentStay['start_time'],
+                            'end_time' => $currentStay['end_time'],
+                            'duration_minutes' => round($durationMinutes, 1),
+                            'latitude' => $currentStay['center_lat'],
+                            'longitude' => $currentStay['center_lon'],
+                            'start_time_formatted' => date('d.m.Y H:i', $currentStay['start_time']),
+                            'end_time_formatted' => date('d.m.Y H:i', $currentStay['end_time']),
+                            'detection_method' => 'linear_simple',
+                            'points_count' => count($currentStay['points']),
+                            'max_movement_radius' => $maxMovementRadius,
+                            'avg_speed_kmh' => 0 // Stillstand
+                        ];
+                        
+                        $this->logger->debug('Linearer Besuch erkannt', [
+                            'duration_minutes' => round($durationMinutes, 1),
+                            'points' => count($currentStay['points']),
+                            'center' => round($currentStay['center_lat'], 5) . ',' . round($currentStay['center_lon'], 5)
+                        ]);
+                    }
+                    
+                    // Neuen Aufenthalt starten (wenn nicht in Bewegung)
+                    if (!$isMoving) {
+                        $currentStay = [
+                            'start_time' => $timestamp,
+                            'end_time' => $timestamp,
+                            'points' => [$point],
+                            'center_lat' => $latitude,
+                            'center_lon' => $longitude
+                        ];
+                    } else {
+                        $currentStay = null;
+                    }
+                }
+            }
+        }
+        
+        // Letzten Aufenthalt verarbeiten
+        if ($currentStay !== null) {
+            $durationMinutes = ($currentStay['end_time'] - $currentStay['start_time']) / 60;
+            
+            if ($durationMinutes >= $minimumStopDurationMinutes) {
+                $visits[] = [
+                    'device_id' => $deviceId,
+                    'start_time' => $currentStay['start_time'],
+                    'end_time' => $currentStay['end_time'],
+                    'duration_minutes' => round($durationMinutes, 1),
+                    'latitude' => $currentStay['center_lat'],
+                    'longitude' => $currentStay['center_lon'],
+                    'start_time_formatted' => date('d.m.Y H:i', $currentStay['start_time']),
+                    'end_time_formatted' => date('d.m.Y H:i', $currentStay['end_time']),
+                    'detection_method' => 'linear_simple',
+                    'points_count' => count($currentStay['points']),
+                    'max_movement_radius' => $maxMovementRadius,
+                    'avg_speed_kmh' => 0
+                ];
+            }
+        }
+        
+        $this->logger->info('Lineare Besuchsanalyse abgeschlossen', [
+            'device_id' => $deviceId,
+            'visits_found' => count($visits),
+            'total_points_processed' => count($trackingData)
+        ]);
+        
+        return $visits;
+    }
+    
+    /**
+     * Entfernt doppelte Besuche basierend auf Zeit und Position
+     */
+    private function removeDuplicateVisits(array $visits): array
+    {
+        $uniqueVisits = [];
+        $timeToleranceMinutes = 30; // 30 Minuten Toleranz
+        $distanceToleranceMeters = 100; // 100 Meter Toleranz
+        
+        foreach ($visits as $visit) {
+            $isDuplicate = false;
+            
+            foreach ($uniqueVisits as $existingVisit) {
+                $timeDiff = abs($visit['start_time'] - $existingVisit['start_time']) / 60;
+                $distance = $this->calculateDistance(
+                    $visit['latitude'], $visit['longitude'],
+                    $existingVisit['latitude'], $existingVisit['longitude']
+                );
+                
+                if ($timeDiff <= $timeToleranceMinutes && $distance <= $distanceToleranceMeters) {
+                    $isDuplicate = true;
+                    break;
+                }
+            }
+            
+            if (!$isDuplicate) {
+                $uniqueVisits[] = $visit;
+            }
+        }
+        
+        // Sortiere nach Startzeit
+        usort($uniqueVisits, function($a, $b) {
+            return $a['start_time'] <=> $b['start_time'];
+        });
+        
+        return $uniqueVisits;
     }
 }

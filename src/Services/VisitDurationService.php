@@ -341,4 +341,48 @@ class VisitDurationService
         $count = $this->connection->executeQuery($sql, [$vehicleId, $customerId])->fetchOne();
         return $count > 0;
     }
+
+    /**
+     * Holt Besuchsinformationen für Kalender-Update
+     */
+    public function getVisitInfo(string $vehicleId, string $customerId): ?array
+    {
+        try {
+            $sql = "SELECT cv.*, pt.vehicle_latitude, pt.vehicle_longitude, pt.distance_meters
+                    FROM confirmed_visits cv
+                    LEFT JOIN position_tracking pt ON (
+                        cv.vehicle_id = pt.vehicle_id 
+                        AND cv.customer_id = pt.customer_id
+                        AND pt.position_time >= cv.start_time
+                        ORDER BY pt.position_time LIMIT 1
+                    )
+                    WHERE cv.vehicle_id = ? AND cv.customer_id = ? 
+                    AND cv.end_time IS NULL 
+                    ORDER BY cv.start_time DESC 
+                    LIMIT 1";
+
+            $result = $this->connection->executeQuery($sql, [$vehicleId, $customerId]);
+            $visit = $result->fetchAssociative();
+            
+            if ($visit) {
+                return [
+                    'start_time' => $visit['start_time'],
+                    'calendar_event_id' => $visit['calendar_event_id'],
+                    'vehicle_latitude' => $visit['vehicle_latitude'],
+                    'vehicle_longitude' => $visit['vehicle_longitude'],
+                    'distance_meters' => $visit['distance_meters'] ?? 0
+                ];
+            }
+            
+            return null;
+            
+        } catch (\Exception $e) {
+            $this->logger->error('Fehler beim Abrufen der Besuchsinfo', [
+                'vehicle' => $vehicleId,
+                'customer' => $customerId,
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
 }

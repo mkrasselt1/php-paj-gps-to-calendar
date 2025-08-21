@@ -13,6 +13,7 @@ use PajGpsCalendar\Services\CalendarService;
 use PajGpsCalendar\Services\CrmService;
 use PajGpsCalendar\Services\GeoService;
 use PajGpsCalendar\Services\VisitDurationService;
+use PajGpsCalendar\Services\BlindSpotService;
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 
@@ -52,6 +53,7 @@ class CheckCommand extends Command
             $crm = new CrmService($this->config, $this->logger, new GeoService($this->config, $this->logger));
             $calendar = new CalendarService($this->config, $this->logger);
             $visitDuration = new VisitDurationService($this->config, $this->logger);
+            $blindSpot = new BlindSpotService($this->config);
 
             // Fahrzeuge abrufen
             $output->writeln('Lade Fahrzeugdaten...');
@@ -71,6 +73,17 @@ class CheckCommand extends Command
             
             foreach ($vehicles as $vehicle) {
                 $output->writeln(sprintf('Prüfe Fahrzeug: %s', $vehicle['name']));
+                
+                // Prüfe ob Fahrzeug in einem blinden Fleck steht
+                $blindSpotInfo = $blindSpot->isInBlindSpot($vehicle['latitude'], $vehicle['longitude']);
+                if ($blindSpotInfo) {
+                    $output->writeln(sprintf(
+                        '  🚫 Fahrzeug in blindem Fleck "%s" (%.0fm) - überspringe',
+                        $blindSpotInfo['name'],
+                        $blindSpotInfo['distance_meters']
+                    ));
+                    continue;
+                }
                 
                 // ✨ HYBRIDE STANDZEIT-BERECHNUNG: PAJ + VisitDurationService
                 $speed = $vehicle['speed'] ?? 0;  // Direkte PAJ-Geschwindigkeit verwenden
@@ -110,12 +123,34 @@ class CheckCommand extends Command
                     continue;
                 }
                 
+                // *** NEUE LOGIK: Nur den nächstgelegenen Kunden berücksichtigen ***
+                $closestCustomer = null;
+                $minDistance = PHP_FLOAT_MAX;
+                
                 foreach ($nearbyCustomers as $customer) {
+                    if ($customer['distance_meters'] < $minDistance) {
+                        $minDistance = $customer['distance_meters'];
+                        $closestCustomer = $customer;
+                    }
+                }
+                
+                // Zeige alle Kunden, aber verarbeite nur den nächsten
+                foreach ($nearbyCustomers as $customer) {
+                    $isClosest = ($customer === $closestCustomer);
+                    $indicator = $isClosest ? '🎯' : '📍';
+                    
                     $output->writeln(sprintf(
-                        '  -> In der Nähe von %s (%.0fm)', 
+                        '  %s In der Nähe von %s (%.0fm)%s', 
+                        $indicator,
                         $customer['customer_name'], 
-                        $customer['distance_meters']
+                        $customer['distance_meters'],
+                        $isClosest ? ' - NÄCHSTER' : ''
                     ));
+                    
+                    // Nur für den nächsten Kunden Besuchslogik ausführen
+                    if (!$isClosest) {
+                        continue;
+                    }
                     
                     // ✨ VEREINFACHTE BESUCHSERKENNUNG basierend auf Standort und Bewegung:
                     $shouldCreateEntry = false;
@@ -148,51 +183,63 @@ class CheckCommand extends Command
                     
                     $output->writeln(sprintf('    🎯 Entscheidung: %s', $reason));
                     
+                    // Prüfe ob bereits ein Kalendereintrag existiert
+                    $hasExistingEntry = $calendar->hasRecentEntry($vehicle, $customer);
+                    
                     // Nur Kalendereintrag erstellen wenn:
                     // 1. Besuchskriterien erfüllt
-                    // 2. Noch kein Eintrag für diesen Besuch
-                    if ($shouldCreateEntry && 
-                        !$visitDuration->isVisitAlreadyConfirmed($vehicle['id'], $customer['customer_id'])) {
+                    // 2. Noch kein Eintrag im Kalender für diesen Besuch
+                    if ($shouldCreateEntry && !$hasExistingEntry) {
                         
                         if (!$dryRun) {
                             if ($calendar->createEntry($vehicle, $customer, $customer['distance_meters'])) {
-                                // Besuch bestätigen und in Tracking-DB speichern
-                                $eventId = $calendar->getLastCreatedEventId();
-                                $visitDuration->confirmVisit($vehicle['id'], $customer['customer_id'], $eventId);
-                                $crm->saveVisitEntry($vehicle, $customer, $customer['distance_meters'], $eventId);
-                                
                                 $entriesCreated++;
                                 $output->writeln('    ✅ Kalendereintrag erstellt');
+                            } else {
+                                $output->writeln('    ❌ Fehler beim Erstellen des Kalendereintrags');
                             }
                         } else {
                             $output->writeln('    📅 Kalendereintrag würde erstellt werden (Dry-Run)');
                         }
-                    } else if ($shouldCreateEntry) {
-                        $output->writeln('    ⏭️  Besuch bereits bestätigt - überspringe');
+                    } else if ($shouldCreateEntry && $hasExistingEntry) {
+                        $output->writeln('    ⏭️  Besuch bereits im Kalender - überspringe');
                     } else {
                         $output->writeln('    ⏱️  Besuchskriterien noch nicht erfüllt');
                     }
                 }
                 
-                // Prüfe beendete Besuche (Fahrzeug hat sich von Kunden entfernt)
-                $currentStats = $visitDuration->getCurrentVisitStatistics();
-                foreach ($currentStats as $stat) {
-                    if ($stat['vehicle_id'] === $vehicle['id']) {
-                        // Prüfe ob Fahrzeug noch in der Nähe ist
-                        $stillNearby = false;
-                        foreach ($nearbyCustomers as $nearby) {
-                            if ($nearby['customer_id'] === $stat['customer_id']) {
-                                $stillNearby = true;
-                                break;
-                            }
+                // Prüfe beendete Besuche: Fahrzeuge die heute Events haben aber nicht mehr in der Nähe sind
+                $todaysEvents = $calendar->getTodaysEventsForVehicle($vehicle['id']);
+                foreach ($todaysEvents as $event) {
+                    // Prüfe ob Event noch einem aktuellen Besuch entspricht
+                    $eventStillActive = false;
+                    foreach ($nearbyCustomers as $customer) {
+                        $expectedEventId = $calendar->generateEventId($vehicle, $customer);
+                        if ($event['event_id'] === $expectedEventId) {
+                            $eventStillActive = true;
+                            break;
                         }
-                        
-                        if (!$stillNearby) {
-                            $visitDuration->endVisit($stat['vehicle_id'], $stat['customer_id']);
-                            $output->writeln(sprintf(
-                                '    🚗 Besuch bei %s beendet', 
-                                $stat['customer_name']
-                            ));
+                    }
+                    
+                    // Event existiert, aber Fahrzeug ist nicht mehr in der Nähe → Update mit Endzeit
+                    if (!$eventStillActive && !$dryRun) {
+                        // Parse Kunden-ID aus Event-ID
+                        if (preg_match('/paj-gps-.*?-(.+?)-[a-f0-9]+$/', $event['event_id'], $matches)) {
+                            $customerId = $matches[1];
+                            $customer = $crm->getCustomerById($customerId);
+                            if ($customer) {
+                                $calendar->updateEntryWithEndTime(
+                                    $event['event_id'],
+                                    $vehicle,
+                                    $customer,
+                                    0 // Distanz unbekannt bei Update
+                                );
+                                
+                                $output->writeln(sprintf(
+                                    '    🚗 Besuch bei %s beendet und Kalendereintrag aktualisiert', 
+                                    $customer['customer_name']
+                                ));
+                            }
                         }
                     }
                 }
