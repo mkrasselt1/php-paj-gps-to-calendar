@@ -105,7 +105,7 @@ class CalendarService
     /**
      * Erstellt einen historischen Kalendereintrag mit den tatsächlichen Besuchszeiten
      */
-    public function createHistoricalEntry(array $vehicle, array $location, float $distance, int $startTimestamp, int $endTimestamp): bool
+    public function createHistoricalEntry(array $vehicle, array $location, float $distance, int $startTimestamp, int $endTimestamp, bool $forceUpdate = false): bool
     {
         try {
             $eventId = $this->generateHistoricalEventId($vehicle, $location, $startTimestamp);
@@ -119,13 +119,31 @@ class CalendarService
             
             $icalContent = $this->generateHistoricalICalContent($vehicle, $location, $distance, $startTime, $endTime);
 
+            // Debug-Logging für iCalendar Content (bei Debug-Level)
+            $this->logger->debug('iCalendar Content generiert', [
+                'event_id' => $eventId,
+                'content_length' => strlen($icalContent),
+                'line_count' => substr_count($icalContent, "\n"),
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name'],
+                'start_time' => $startTime->format('Y-m-d H:i:s'),
+                'end_time' => $endTime->format('Y-m-d H:i:s')
+            ]);
+
             if ($this->config->get('calendar.type') === 'caldav') {
-                $this->createCalDavEvent($eventId, $icalContent);
+                if ($forceUpdate) {
+                    // Für Update: Erst prüfen ob Eintrag existiert, dann überschreiben
+                    $this->updateCalDavEvent($eventId, $icalContent);
+                } else {
+                    // Normaler Create-Modus
+                    $this->createCalDavEvent($eventId, $icalContent);
+                }
             } else {
                 throw new \Exception('Kalendertyp nicht unterstützt: ' . $this->config->get('calendar.type'));
             }
 
-            $this->logger->info('Historischer Kalendereintrag erstellt', [
+            $logAction = $forceUpdate ? 'aktualisiert' : 'erstellt';
+            $this->logger->info("Historischer Kalendereintrag {$logAction}", [
                 'vehicle' => $vehicle['name'],
                 'customer' => $location['customer_name'],
                 'distance' => $distance,
@@ -169,6 +187,9 @@ class CalendarService
 
         $eventPath = $eventId . '.ics';
         
+        // Validiere iCalendar Content vor dem Senden
+        $this->validateICalendarContent($icalContent, $eventId);
+        
         $response = $this->davClient->request('PUT', $eventPath, $icalContent, [
             'Content-Type' => 'text/calendar',
         ]);
@@ -179,9 +200,15 @@ class CalendarService
                 'response_body' => $response['body'] ?? 'No response body',
                 'event_path' => $eventPath,
                 'caldav_url' => $this->config->get('calendar.caldav_url'),
-                'ical_content_length' => strlen($icalContent)
+                'ical_content_length' => strlen($icalContent),
+                'ical_line_count' => substr_count($icalContent, "\n"),
+                'event_id' => $eventId
             ];
-            throw new \Exception('CalDAV Event konnte nicht erstellt werden: ' . json_encode($errorDetails));
+            
+            // Spezifische Fehlermeldungen für häufige CalDAV Probleme
+            $errorMessage = $this->getDetailedCalDavError($response['statusCode'], $response['body'] ?? '', $errorDetails);
+            
+            throw new \Exception($errorMessage);
         }
     }
 
@@ -236,9 +263,9 @@ class CalendarService
         $ical .= "DTSTAMP:" . $now->format('Ymd\THis\Z') . "\r\n";
         $ical .= "DTSTART:" . $eventStart->format('Ymd\THis') . "\r\n";
         $ical .= "DTEND:" . $eventEnd->format('Ymd\THis') . "\r\n";
-        $ical .= "SUMMARY:{$summary}\r\n";
-        $ical .= "DESCRIPTION:{$description}\r\n";
-        $ical .= "LOCATION:{$locationText}\r\n";
+        $ical .= $this->foldICalLine("SUMMARY", $summary);
+        $ical .= $this->foldICalLine("DESCRIPTION", $description);
+        $ical .= $this->foldICalLine("LOCATION", $locationText);
         $ical .= "CATEGORIES:PAJ-GPS,Fahrzeugverfolgung\r\n";
         $ical .= "STATUS:CONFIRMED\r\n";
         $ical .= "TRANSP:TRANSPARENT\r\n";
@@ -287,9 +314,9 @@ class CalendarService
         $ical .= "DTSTAMP:" . $now->format('Ymd\THis\Z') . "\r\n";
         $ical .= "DTSTART;TZID={$timezone}:" . $startTime->format('Ymd\THis') . "\r\n";
         $ical .= "DTEND;TZID={$timezone}:" . $endTime->format('Ymd\THis') . "\r\n";
-        $ical .= "SUMMARY:{$summary}\r\n";
-        $ical .= "DESCRIPTION:{$description}\r\n";
-        $ical .= "LOCATION:{$locationText}\r\n";
+        $ical .= $this->foldICalLine("SUMMARY", $summary);
+        $ical .= $this->foldICalLine("DESCRIPTION", $description);
+        $ical .= $this->foldICalLine("LOCATION", $locationText);
         $ical .= "CATEGORIES:PAJ-GPS,Fahrzeugverfolgung,Historisch\r\n";
         $ical .= "STATUS:CONFIRMED\r\n";
         $ical .= "END:VEVENT\r\n";
@@ -320,12 +347,47 @@ class CalendarService
         // Entferne Steuerzeichen die Probleme machen können
         $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
         
-        // Begrenzt auf vernünftige Länge
-        if (strlen($text) > 200) {
-            $text = substr($text, 0, 197) . '...';
+        // Begrenzt auf vernünftige Länge für iCalendar (RFC empfiehlt max 998 Zeichen pro Zeile)
+        // Aber für DESCRIPTION können wir mehr verwenden da es gefaltet wird
+        if (strlen($text) > 2000) {
+            $text = substr($text, 0, 1997) . '...';
         }
         
         return $text;
+    }
+    
+    /**
+     * Faltet iCalendar-Zeilen gemäß RFC 5545 (max 75 Zeichen pro Zeile)
+     */
+    private function foldICalLine(string $property, string $value): string
+    {
+        $line = $property . ':' . $value;
+        
+        // Wenn die Zeile kürzer als 75 Zeichen ist, keine Faltung nötig
+        if (strlen($line) <= 75) {
+            return $line . "\r\n";
+        }
+        
+        $result = '';
+        $pos = 0;
+        $lineLength = strlen($line);
+        
+        // Erste Zeile: max 75 Zeichen
+        $firstLineLength = min(75, $lineLength);
+        $result .= substr($line, 0, $firstLineLength) . "\r\n";
+        $pos += $firstLineLength;
+        
+        // Fortsetzungszeilen: max 74 Zeichen (wegen Leerzeichen am Anfang)
+        while ($pos < $lineLength) {
+            $remainingLength = $lineLength - $pos;
+            $chunkLength = min(74, $remainingLength);
+            
+            // Fortsetzungszeile mit führendem Leerzeichen
+            $result .= ' ' . substr($line, $pos, $chunkLength) . "\r\n";
+            $pos += $chunkLength;
+        }
+        
+        return $result;
     }
 
     private function generateEventDescription(array $vehicle, array $location, float $distance): string
@@ -550,9 +612,9 @@ class CalendarService
         $ical .= "DTSTAMP:" . $now->format('Ymd\THis\Z') . "\r\n";
         $ical .= "DTSTART;TZID={$timezone}:" . $startTime->format('Ymd\THis') . "\r\n";
         $ical .= "DTEND;TZID={$timezone}:" . $endTime->format('Ymd\THis') . "\r\n";
-        $ical .= "SUMMARY:{$summary}\r\n";
-        $ical .= "DESCRIPTION:{$description}\r\n";
-        $ical .= "LOCATION:" . ($location['full_address'] ?? 'Adresse unbekannt') . "\r\n";
+        $ical .= $this->foldICalLine("SUMMARY", $summary);
+        $ical .= $this->foldICalLine("DESCRIPTION", $description);
+        $ical .= $this->foldICalLine("LOCATION", $location['full_address'] ?? 'Adresse unbekannt');
         $ical .= "CATEGORIES:PAJ-GPS,Fahrzeugverfolgung\r\n";
         $ical .= "STATUS:CONFIRMED\r\n";
         $ical .= "SEQUENCE:1\r\n"; // Erhöhe Sequence für Update
@@ -774,6 +836,109 @@ class CalendarService
                 'error' => $e->getMessage()
             ]);
             return null;
+        }
+    }
+    
+    /**
+     * Validiert iCalendar Content auf häufige Probleme
+     */
+    private function validateICalendarContent(string $icalContent, string $eventId): void
+    {
+        // Grundlegende Strukturprüfung
+        if (!str_contains($icalContent, 'BEGIN:VCALENDAR')) {
+            throw new \Exception("iCalendar Content ungültig: Fehlendes BEGIN:VCALENDAR (Event ID: {$eventId})");
+        }
+        
+        if (!str_contains($icalContent, 'END:VCALENDAR')) {
+            throw new \Exception("iCalendar Content ungültig: Fehlendes END:VCALENDAR (Event ID: {$eventId})");
+        }
+        
+        if (!str_contains($icalContent, 'BEGIN:VEVENT')) {
+            throw new \Exception("iCalendar Content ungültig: Fehlendes BEGIN:VEVENT (Event ID: {$eventId})");
+        }
+        
+        if (!str_contains($icalContent, 'END:VEVENT')) {
+            throw new \Exception("iCalendar Content ungültig: Fehlendes END:VEVENT (Event ID: {$eventId})");
+        }
+        
+        // Größenprüfung (iCalendar RFC empfiehlt max 998 Zeichen pro Zeile)
+        $lines = explode("\n", $icalContent);
+        foreach ($lines as $lineNum => $line) {
+            if (strlen($line) > 998) {
+                throw new \Exception("iCalendar Zeile zu lang (Zeile " . ($lineNum + 1) . ", " . strlen($line) . " Zeichen): " . substr($line, 0, 100) . "... (Event ID: {$eventId})");
+            }
+        }
+        
+        // Content-Größenprüfung (NextCloud hat oft Limits)
+        if (strlen($icalContent) > 65536) { // 64KB Limit
+            throw new \Exception("iCalendar Content zu groß (" . strlen($icalContent) . " Bytes, max 64KB): Event ID {$eventId}");
+        }
+        
+        // Prüfe auf problematische Zeichen
+        if (preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $icalContent)) {
+            throw new \Exception("iCalendar Content enthält ungültige Steuerzeichen (Event ID: {$eventId})");
+        }
+    }
+    
+    /**
+     * Gibt detaillierte Fehlermeldungen für CalDAV Probleme zurück
+     */
+    private function getDetailedCalDavError(int $statusCode, string $responseBody, array $errorDetails): string
+    {
+        $baseMessage = "CalDAV Fehler (Status {$statusCode})";
+        
+        switch ($statusCode) {
+            case 400:
+                return "{$baseMessage}: Ungültige Anfrage - iCalendar Format fehlerhaft. " .
+                       "Prüfen Sie Datum/Zeit-Formate und Zeichen-Escaping. " .
+                       "Details: " . json_encode($errorDetails);
+                       
+            case 401:
+                return "{$baseMessage}: Authentifizierung fehlgeschlagen. " .
+                       "Prüfen Sie Benutzername und Passwort in der Konfiguration.";
+                       
+            case 403:
+                return "{$baseMessage}: Zugriff verweigert. " .
+                       "Der Benutzer hat keine Berechtigung zum Schreiben in diesen Kalender.";
+                       
+            case 404:
+                return "{$baseMessage}: Kalender nicht gefunden. " .
+                       "Prüfen Sie die CalDAV URL: " . $errorDetails['caldav_url'];
+                       
+            case 409:
+                return "{$baseMessage}: Konflikt - Event existiert bereits oder Versionsfehler. " .
+                       "Event ID: " . $errorDetails['event_id'];
+                       
+            case 413:
+                return "{$baseMessage}: Payload zu groß. " .
+                       "iCalendar Content ist zu umfangreich (" . $errorDetails['ical_content_length'] . " Bytes). " .
+                       "Kürzen Sie die Beschreibung oder entfernen Sie Details.";
+                       
+            case 415:
+                return "{$baseMessage}: Unsupported Media Type. " .
+                       "CalDAV Server akzeptiert das iCalendar Format nicht. " .
+                       "Möglicherweise fehlerhafte MIME-Type oder Content-Encoding.";
+                       
+            case 422:
+                return "{$baseMessage}: Unverarbeitbare Entität. " .
+                       "iCalendar ist syntaktisch korrekt, aber semantisch ungültig. " .
+                       "Prüfen Sie Datum/Zeit-Bereiche und Zeitzone-Definitionen.";
+                       
+            case 500:
+                return "{$baseMessage}: Server-Fehler. " .
+                       "Der CalDAV Server hat einen internen Fehler. " .
+                       "Response: " . substr($responseBody, 0, 200);
+                       
+            case 502:
+            case 503:
+            case 504:
+                return "{$baseMessage}: Server temporär nicht verfügbar. " .
+                       "Versuchen Sie es später erneut.";
+                       
+            default:
+                return "{$baseMessage}: Unbekannter Fehler. " .
+                       "Response: " . substr($responseBody, 0, 200) . " " .
+                       "Details: " . json_encode($errorDetails);
         }
     }
 }

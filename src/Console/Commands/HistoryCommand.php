@@ -56,6 +56,12 @@ class HistoryCommand extends Command
                 'd',
                 InputOption::VALUE_NONE,
                 'Führt eine Testausführung durch ohne Kalendereinträge zu erstellen'
+            )
+            ->addOption(
+                'force-update',
+                'f',
+                InputOption::VALUE_NONE,
+                'Aktualisiert bestehende Kalendereinträge statt sie zu überspringen'
             );
     }
 
@@ -69,11 +75,16 @@ class HistoryCommand extends Command
             $toDate = $input->getOption('to');
             $vehicleId = $input->getOption('vehicle-id');
             $dryRun = $input->getOption('dry-run');
+            $forceUpdate = $input->getOption('force-update');
             
             $output->writeln('<info>PAJ GPS to Calendar - Historische Datenanalyse</info>');
             
             if ($dryRun) {
                 $output->writeln('<comment>Dry-Run Modus aktiviert</comment>');
+            }
+            
+            if ($forceUpdate) {
+                $output->writeln('<comment>Force-Update Modus: Bestehende Einträge werden aktualisiert</comment>');
             }
 
             // Services initialisieren
@@ -224,20 +235,58 @@ class HistoryCommand extends Command
                         ];
                         
                         // Prüfe auf existierenden historischen Eintrag
-                        if (!$calendar->hasExistingHistoricalEntry($vehicleData, $closestCustomer, $visit['start_time'])) {
+                        $existingEntry = $calendar->hasExistingHistoricalEntry($vehicleData, $closestCustomer, $visit['start_time']);
+                        
+                        if (!$existingEntry || $forceUpdate) {
+                            if ($existingEntry && $forceUpdate) {
+                                $output->writeln('      🔄 Aktualisiere bestehenden Kalendereintrag...');
+                            }
+                            
                             // Verwende die neue historische Methode mit tatsächlichen Zeiten
-                            if ($calendar->createHistoricalEntry(
-                                $vehicleData, 
-                                $closestCustomer, 
-                                $closestCustomer['distance_meters'], 
-                                $visit['start_time'], 
-                                $visit['end_time']
-                            )) {
-                                $entriesForVehicle++;
-                                $totalEntriesCreated++;
-                                $output->writeln('      ✅ Kalendereintrag erstellt');
-                            } else {
-                                $output->writeln('      ❌ Fehler beim Erstellen des Kalendereintrags');
+                            try {
+                                if ($calendar->createHistoricalEntry(
+                                    $vehicleData, 
+                                    $closestCustomer, 
+                                    $closestCustomer['distance_meters'], 
+                                    $visit['start_time'], 
+                                    $visit['end_time'],
+                                    $forceUpdate // Flag für Update-Modus
+                                )) {
+                                    $entriesForVehicle++;
+                                    $totalEntriesCreated++;
+                                    if ($existingEntry && $forceUpdate) {
+                                        $output->writeln('      ✅ Kalendereintrag aktualisiert');
+                                    } else {
+                                        $output->writeln('      ✅ Kalendereintrag erstellt');
+                                    }
+                                } else {
+                                    $output->writeln('      ❌ Fehler beim Erstellen/Aktualisieren des Kalendereintrags');
+                                    $output->writeln('<error>KRITISCHER FEHLER: Kalendereintrag konnte nicht erstellt werden!</error>');
+                                    $output->writeln('<error>Fahrzeug: ' . $vehicle['name'] . '</error>');
+                                    $output->writeln('<error>Kunde: ' . $closestCustomer['customer_name'] . '</error>');
+                                    $output->writeln('<error>Zeit: ' . $visit['start_time_formatted'] . '</error>');
+                                    $output->writeln('<error>Script wird beendet um weitere Fehler zu vermeiden.</error>');
+                                    return Command::FAILURE;
+                                }
+                            } catch (\Exception $calendarException) {
+                                $output->writeln('      ❌ KALENDERFEHLER: ' . $calendarException->getMessage());
+                                $output->writeln('<error>═══════════════════════════════════════════════════════════</error>');
+                                $output->writeln('<error>KRITISCHER KALENDERFEHLER AUFGETRETEN!</error>');
+                                $output->writeln('<error>═══════════════════════════════════════════════════════════</error>');
+                                $output->writeln('<error>Fahrzeug: ' . $vehicle['name'] . ' (ID: ' . $vehicle['id'] . ')</error>');
+                                $output->writeln('<error>Kunde: ' . $closestCustomer['customer_name'] . '</error>');
+                                $output->writeln('<error>Adresse: ' . ($closestCustomer['full_address'] ?? 'Unbekannt') . '</error>');
+                                $output->writeln('<error>Besuchszeit: ' . $visit['start_time_formatted'] . ' - ' . $visit['end_time_formatted'] . '</error>');
+                                $output->writeln('<error>Dauer: ' . round($visit['duration_minutes']) . ' Minuten</error>');
+                                $output->writeln('<error>Entfernung: ' . round($closestCustomer['distance_meters']) . ' Meter</error>');
+                                $output->writeln('<error>Fehlermeldung: ' . $calendarException->getMessage() . '</error>');
+                                if (method_exists($calendarException, 'getCode') && $calendarException->getCode()) {
+                                    $output->writeln('<error>Fehlercode: ' . $calendarException->getCode() . '</error>');
+                                }
+                                $output->writeln('<error>═══════════════════════════════════════════════════════════</error>');
+                                $output->writeln('<error>Script wird zur Fehleranalyse beendet.</error>');
+                                $output->writeln('<error>Bitte prüfen Sie die Logs für weitere Details.</error>');
+                                return Command::FAILURE;
                             }
                         } else {
                             $output->writeln('      ⏭️  Kalendereintrag bereits vorhanden');
