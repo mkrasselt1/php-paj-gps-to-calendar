@@ -122,24 +122,25 @@ class CheckCommand extends Command
                     $reason = '';
                     
                     // 1. Hauptkriterium: Keine Bewegung + Mindestaufenthaltsdauer
-                    if (!$movementDetected && $stopDuration >= 5 && $speed < 1) {
+                    if (!$movementDetected && $stopDuration >= $minimumVisitDuration && $speed < 1) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, keine Bewegung, 0 km/h', $stopDuration);
+                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, keine Bewegung, %.1f km/h', $stopDuration, $speed);
                     }
                     // 2. Längerer Stopp auch bei geringer Bewegung (z.B. GPS-Drift)
-                    else if ($stopDuration >= 8 && $speed < 2) {
+                    else if ($stopDuration >= ($minimumVisitDuration * 2) && $speed < 2) {
                         $shouldCreateEntry = true;
                         $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, minimal bewegt (%.1f km/h)', $stopDuration, $speed);
                     }
                     // 3. Sehr langer Stopp - definitiv ein Besuch
-                    else if ($stopDuration >= 15) {
+                    else if ($stopDuration >= ($minimumVisitDuration * 5)) {
                         $shouldCreateEntry = true;
                         $reason = sprintf('✅ Besuch erkannt: Sehr langer Aufenthalt (%d Min)', $stopDuration);
                     }
                     // 4. Kriterien noch nicht erfüllt - warten
                     else {
-                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden, %.1f km/h, %s', 
+                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden (braucht %d Min), %.1f km/h, %s', 
                             $stopDuration, 
+                            $minimumVisitDuration,
                             $speed,
                             $movementDetected ? 'Bewegung erkannt' : 'keine Bewegung'
                         );
