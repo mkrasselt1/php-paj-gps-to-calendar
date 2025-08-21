@@ -128,8 +128,32 @@ settings:
   # Entfernung in Metern für Nähe-Erkennung
   proximity_threshold_meters: 500
   
+  # Mindestaufenthaltsdauer in Minuten für Besuchserkennung
+  minimum_visit_duration_minutes: 2
+  
   # Zeitraum in Stunden für Duplikat-Prüfung
   duplicate_check_hours: 24
+  
+  # Blinde Flecken - Bereiche die ignoriert werden sollen
+  # Useful for company parking lots, service stations etc.
+  blind_spots:
+    # Firmenparkplatz/Basis - hier werden keine Besuche erfasst
+    - name: "Firmenparkplatz"
+      latitude: 50.12345    # GPS-Koordinaten des Zentrums
+      longitude: 12.67890
+      radius_meters: 200    # Radius in Metern
+      
+    # Tankstelle - hier keine Kundenbesuche
+    - name: "Tankstelle Hauptstraße"
+      latitude: 50.11111
+      longitude: 12.22222
+      radius_meters: 100
+      
+    # Weitere blinde Flecken können hier hinzugefügt werden
+    # - name: "Service Center"
+    #   latitude: 50.33333
+    #   longitude: 12.44444
+    #   radius_meters: 150
   
   # Log-Level: debug, info, warning, error
   log_level: "info"
