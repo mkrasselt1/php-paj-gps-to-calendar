@@ -228,13 +228,13 @@ class PajApiService
         }
         
         try {
-            // Hole die letzten 10 Positionen um Stopp-Beginn zu finden
+            // Hole die letzten 50 Positionen um längere Standzeiten zu erkennen
             $response = $this->httpClient->get("/api/v1/trackerdata/{$deviceId}/last_points", [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $this->accessToken,
                 ],
                 'query' => [
-                    'lastPoints' => 10,
+                    'lastPoints' => 50,  // Erweitert von 10 auf 50 für bessere Standzeit-Erkennung
                     'gps' => 1
                 ]
             ]);

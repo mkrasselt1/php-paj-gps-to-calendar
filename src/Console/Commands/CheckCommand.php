@@ -67,16 +67,24 @@ class CheckCommand extends Command
 
             $entriesCreated = 0;
             $proximityThreshold = $this->config->get('settings.proximity_threshold_meters', 500);
+            $minimumVisitDuration = $this->config->get('settings.minimum_visit_duration_minutes', 2);
             
             foreach ($vehicles as $vehicle) {
                 $output->writeln(sprintf('Prüfe Fahrzeug: %s', $vehicle['name']));
                 
-                // ✨ VEREINFACHTE STANDORT-ANALYSE ohne Motor/Batterie-Komplexität
-                $detailedAnalysis = $pajApi->getDetailedStopAnalysis($vehicle['id'], 30);
+                // ✨ HYBRIDE STANDZEIT-BERECHNUNG: PAJ + VisitDurationService
+                $speed = $vehicle['speed'] ?? 0;  // Direkte PAJ-Geschwindigkeit verwenden
+                $pajStopDuration = $vehicle['stop_duration_minutes'] ?? 0;
+                $movementDetected = $speed > 1;  // Einfache Bewegungserkennung basierend auf PAJ-Speed
                 
-                $stopDuration = $detailedAnalysis['stop_duration_minutes'] ?? $vehicle['stop_duration_minutes'] ?? 0;
-                $speed = $detailedAnalysis['average_speed'] ?? $vehicle['speed'] ?? 0;
-                $movementDetected = $detailedAnalysis['movement_detected'] ?? false;
+                // Verwende VisitDurationService für bessere Standzeit bei stehenden Fahrzeugen
+                if (!$movementDetected && $pajStopDuration > 0) {
+                    // Für stehende Fahrzeuge: Nutze VisitDurationService für präzisere Standzeit
+                    $visitAnalysis = $visitDuration->trackPosition($vehicle);
+                    $stopDuration = max($pajStopDuration, $visitAnalysis['visit_duration_minutes']);
+                } else {
+                    $stopDuration = $pajStopDuration;
+                }
                 
                 $movementIcon = $movementDetected ? '�' : '�';
                 $speedIcon = $speed > 5 ? '�' : ($speed > 1 ? '�' : '🛑');
