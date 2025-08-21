@@ -330,58 +330,58 @@ class CalendarService
 
     private function generateEventDescription(array $vehicle, array $location, float $distance): string
     {
-        $description = "Fahrzeugbesuch bei Kunde erfasst\\n\\n";
+        $description = "Fahrzeugbesuch bei Kunde erfasst\n\n";
         
         // Fahrzeug-Informationen
-        $description .= "FAHRZEUG:\\n";
-        $description .= "- Name: {$vehicle['name']}\\n";
-        $description .= "- ID: " . ($vehicle['id'] ?? 'unbekannt') . "\\n";
-        $description .= "- Entfernung zum Kunden: " . round($distance) . " Meter\\n";
+        $description .= "FAHRZEUG:\n";
+        $description .= "- Name: {$vehicle['name']}\n";
+        $description .= "- ID: " . ($vehicle['id'] ?? 'unbekannt') . "\n";
+        $description .= "- Entfernung zum Kunden: " . round($distance) . " Meter\n";
         
         if (isset($vehicle['speed'])) {
-            $description .= "- Geschwindigkeit: {$vehicle['speed']} km/h\\n";
+            $description .= "- Geschwindigkeit: {$vehicle['speed']} km/h\n";
         }
         
         if (isset($vehicle['timestamp'])) {
-            $description .= "- Erkannt am: " . date('d.m.Y H:i:s', strtotime($vehicle['timestamp'])) . "\\n";
+            $description .= "- Erkannt am: " . date('d.m.Y H:i:s', strtotime($vehicle['timestamp'])) . "\n";
         }
         
-        $description .= "\\n";
+        $description .= "\n";
         
         // Kunden-Informationen (erweitert)
-        $description .= "KUNDE:\\n";
-        $description .= "- Name: {$location['customer_name']}\\n";
+        $description .= "KUNDE:\n";
+        $description .= "- Name: {$location['customer_name']}\n";
         
         if (!empty($location['customer_id'])) {
-            $description .= "- Kundennummer: {$location['customer_id']}\\n";
+            $description .= "- Kundennummer: {$location['customer_id']}\n";
         }
         
-        $description .= "- Adresse: " . ($location['full_address'] ?? 'Adresse unbekannt') . "\\n";
+        $description .= "- Adresse: " . ($location['full_address'] ?? 'Adresse unbekannt') . "\n";
         
         if (!empty($location['contact_person'])) {
-            $description .= "- Ansprechpartner: {$location['contact_person']}\\n";
+            $description .= "- Ansprechpartner: {$location['contact_person']}\n";
         }
         
         if (!empty($location['phone'])) {
-            $description .= "- Telefon: {$location['phone']}\\n";
+            $description .= "- Telefon: {$location['phone']}\n";
         }
         
         if (!empty($location['email'])) {
-            $description .= "- E-Mail: {$location['email']}\\n";
+            $description .= "- E-Mail: {$location['email']}\n";
         }
         
         if (!empty($location['notes'])) {
-            $description .= "- Notizen: {$location['notes']}\\n";
+            $description .= "- Notizen: {$location['notes']}\n";
         }
         
-        $description .= "\\n";
+        $description .= "\n";
         
         // GPS-Koordinaten
-        $description .= "GPS-POSITION:\\n";
-        $description .= "- Fahrzeug: {$vehicle['latitude']}, {$vehicle['longitude']}\\n";
-        $description .= "- Kunde: {$location['latitude']}, {$location['longitude']}\\n";
+        $description .= "GPS-POSITION:\n";
+        $description .= "- Fahrzeug: {$vehicle['latitude']}, {$vehicle['longitude']}\n";
+        $description .= "- Kunde: {$location['latitude']}, {$location['longitude']}\n";
         
-        $description .= "\\n";
+        $description .= "\n";
         $description .= "Dieser Eintrag wurde automatisch durch das PAJ GPS to Calendar System erstellt.";
         
         return $description;
@@ -394,56 +394,56 @@ class CalendarService
     {
         $durationMinutes = round(($endTime->getTimestamp() - $startTime->getTimestamp()) / 60);
         
-        $description = "Fahrzeugbesuch bei Kunde erfasst (Historische Daten)\\n\\n";
+        $description = "Fahrzeugbesuch bei Kunde erfasst (Historische Daten)\n\n";
         
         // Besuchszeiten
-        $description .= "BESUCHSZEITEN:\\n";
-        $description .= "- Ankunft: " . $startTime->format('d.m.Y H:i:s') . "\\n";
-        $description .= "- Abfahrt: " . $endTime->format('d.m.Y H:i:s') . "\\n";
-        $description .= "- Aufenthaltsdauer: {$durationMinutes} Minuten\\n\\n";
+        $description .= "BESUCHSZEITEN:\n";
+        $description .= "- Ankunft: " . $startTime->format('d.m.Y H:i:s') . "\n";
+        $description .= "- Abfahrt: " . $endTime->format('d.m.Y H:i:s') . "\n";
+        $description .= "- Aufenthaltsdauer: {$durationMinutes} Minuten\n\n";
         
         // Fahrzeug-Informationen
-        $description .= "FAHRZEUG:\\n";
-        $description .= "- Name: {$vehicle['name']}\\n";
-        $description .= "- ID: " . ($vehicle['id'] ?? 'unbekannt') . "\\n";
-        $description .= "- Entfernung zum Kunden: " . round($distance) . " Meter\\n";
-        $description .= "- Geschwindigkeit: " . ($vehicle['speed'] ?? 0) . " km/h\\n\\n";
+        $description .= "FAHRZEUG:\n";
+        $description .= "- Name: {$vehicle['name']}\n";
+        $description .= "- ID: " . ($vehicle['id'] ?? 'unbekannt') . "\n";
+        $description .= "- Entfernung zum Kunden: " . round($distance) . " Meter\n";
+        $description .= "- Geschwindigkeit: " . ($vehicle['speed'] ?? 0) . " km/h\n\n";
         
         // Kunden-Informationen
-        $description .= "KUNDE:\\n";
-        $description .= "- Name: {$location['customer_name']}\\n";
+        $description .= "KUNDE:\n";
+        $description .= "- Name: {$location['customer_name']}\n";
         
         if (!empty($location['customer_id'])) {
-            $description .= "- Kundennummer: {$location['customer_id']}\\n";
+            $description .= "- Kundennummer: {$location['customer_id']}\n";
         }
         
-        $description .= "- Adresse: " . ($location['full_address'] ?? 'Adresse unbekannt') . "\\n";
+        $description .= "- Adresse: " . ($location['full_address'] ?? 'Adresse unbekannt') . "\n";
         
         if (!empty($location['contact_person'])) {
-            $description .= "- Ansprechpartner: {$location['contact_person']}\\n";
+            $description .= "- Ansprechpartner: {$location['contact_person']}\n";
         }
         
         if (!empty($location['phone'])) {
-            $description .= "- Telefon: {$location['phone']}\\n";
+            $description .= "- Telefon: {$location['phone']}\n";
         }
         
         if (!empty($location['email'])) {
-            $description .= "- E-Mail: {$location['email']}\\n";
+            $description .= "- E-Mail: {$location['email']}\n";
         }
         
         if (!empty($location['notes'])) {
-            $description .= "- Notizen: {$location['notes']}\\n";
+            $description .= "- Notizen: {$location['notes']}\n";
         }
         
-        $description .= "\\n";
+        $description .= "\n";
         
         // GPS-Koordinaten
-        $description .= "GPS-POSITION:\\n";
-        $description .= "- Fahrzeug: {$vehicle['latitude']}, {$vehicle['longitude']}\\n";
-        $description .= "- Kunde: {$location['latitude']}, {$location['longitude']}\\n";
+        $description .= "GPS-POSITION:\n";
+        $description .= "- Fahrzeug: {$vehicle['latitude']}, {$vehicle['longitude']}\n";
+        $description .= "- Kunde: {$location['latitude']}, {$location['longitude']}\n";
         
-        $description .= "\\n";
-        $description .= "Dieser Eintrag wurde automatisch durch das PAJ GPS to Calendar System erstellt.\\n";
+        $description .= "\n";
+        $description .= "Dieser Eintrag wurde automatisch durch das PAJ GPS to Calendar System erstellt.\n";
         $description .= "Datenquelle: PAJ GPS Historische Analyse";
         
         return $description;

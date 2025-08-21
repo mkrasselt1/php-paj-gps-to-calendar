@@ -34,6 +34,18 @@ class HistoryCommand extends Command
                 7
             )
             ->addOption(
+                'from',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Startdatum der Analyse (Format: YYYY-MM-DD oder DD.MM.YYYY)'
+            )
+            ->addOption(
+                'to',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Enddatum der Analyse (Format: YYYY-MM-DD oder DD.MM.YYYY)'
+            )
+            ->addOption(
                 'vehicle-id',
                 null,
                 InputOption::VALUE_REQUIRED,
@@ -53,11 +65,12 @@ class HistoryCommand extends Command
             $this->initializeServices();
             
             $days = (int) $input->getOption('days');
+            $fromDate = $input->getOption('from');
+            $toDate = $input->getOption('to');
             $vehicleId = $input->getOption('vehicle-id');
             $dryRun = $input->getOption('dry-run');
             
             $output->writeln('<info>PAJ GPS to Calendar - Historische Datenanalyse</info>');
-            $output->writeln(sprintf('Zeitraum: %d Tage zurück', $days));
             
             if ($dryRun) {
                 $output->writeln('<comment>Dry-Run Modus aktiviert</comment>');
@@ -72,8 +85,33 @@ class HistoryCommand extends Command
 
             // Zeitraum definieren
             $timezone = new \DateTimeZone($this->config->get('settings.timezone', 'Europe/Berlin'));
-            $endDate = new \DateTime('now', $timezone);
-            $startDate = (clone $endDate)->sub(new \DateInterval("P{$days}D"));
+            
+            if ($fromDate && $toDate) {
+                // Von-Bis Datumsbereich verwenden
+                $startDate = $this->parseDate($fromDate, $timezone);
+                $endDate = $this->parseDate($toDate, $timezone);
+                
+                // Validierung: Start-Datum muss vor End-Datum liegen
+                if ($startDate > $endDate) {
+                    $output->writeln('<error>Das Start-Datum muss vor dem End-Datum liegen!</error>');
+                    return Command::FAILURE;
+                }
+                
+                // Endzeit auf Ende des Tages setzen
+                $endDate->setTime(23, 59, 59);
+                
+                $daysDiff = $endDate->diff($startDate)->days + 1;
+                $output->writeln(sprintf('Zeitraum: %s bis %s (%d Tage)', 
+                    $startDate->format('d.m.Y'), 
+                    $endDate->format('d.m.Y'),
+                    $daysDiff
+                ));
+            } else {
+                // Traditioneller Tage-Parameter
+                $endDate = new \DateTime('now', $timezone);
+                $startDate = (clone $endDate)->sub(new \DateInterval("P{$days}D"));
+                $output->writeln(sprintf('Zeitraum: %d Tage zurück', $days));
+            }
             
             $output->writeln(sprintf('Von: %s bis: %s', 
                 $startDate->format('d.m.Y H:i'), 
@@ -217,7 +255,7 @@ class HistoryCommand extends Command
             $output->writeln(sprintf('<success>Historische Analyse abgeschlossen!</success>'));
             $output->writeln(sprintf('Besuche gefunden: %d', $totalVisitsFound));
             $output->writeln(sprintf('Kalendereinträge erstellt: %d', $totalEntriesCreated));
-            
+
             return Command::SUCCESS;
             
         } catch (\Exception $e) {
@@ -227,7 +265,45 @@ class HistoryCommand extends Command
         }
     }
     
-    private function initializeServices(): void
+    /**
+     * Parst ein Datum in verschiedenen Formaten
+     */
+    private function parseDate(string $dateString, \DateTimeZone $timezone): \DateTime
+    {
+        $dateString = trim($dateString);
+        
+        // Unterstützte Formate
+        $formats = [
+            'Y-m-d',        // 2025-08-15
+            'd.m.Y',        // 15.08.2025
+            'd/m/Y',        // 15/08/2025
+            'd-m-Y',        // 15-08-2025
+            'Y/m/d',        // 2025/08/15
+            'd.m.y',        // 15.08.25
+            'd/m/y',        // 15/08/25
+        ];
+        
+        foreach ($formats as $format) {
+            $date = \DateTime::createFromFormat($format, $dateString, $timezone);
+            if ($date !== false) {
+                // Startzeit auf Beginn des Tages setzen
+                $date->setTime(0, 0, 0);
+                return $date;
+            }
+        }
+        
+        // Fallback: Versuche natürliche Sprache
+        try {
+            $date = new \DateTime($dateString, $timezone);
+            $date->setTime(0, 0, 0);
+            return $date;
+        } catch (\Exception $e) {
+            throw new \InvalidArgumentException(
+                "Ungültiges Datumsformat: '{$dateString}'. " . 
+                "Unterstützte Formate: YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY, etc."
+            );
+        }
+    }    private function initializeServices(): void
     {
         $this->config = new ConfigService();
         
