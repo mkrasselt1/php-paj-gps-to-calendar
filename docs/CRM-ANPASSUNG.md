@@ -155,7 +155,6 @@ crm:
     phone: "phone_number"          # Ihr Telefon-Feld
     email: "email_address"         # Ihr E-Mail-Feld
     contact_person: "contact"      # Ihr Kontaktperson-Feld
-    notes: "comments"              # Ihr Notizen-Feld
 ```
 
 ## Schritt 6: Geocoding für bestehende Adressen

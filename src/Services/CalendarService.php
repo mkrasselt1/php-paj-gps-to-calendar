@@ -432,9 +432,7 @@ class CalendarService
             $description .= "- E-Mail: {$location['email']}\n";
         }
         
-        if (!empty($location['notes'])) {
-            $description .= "- Notizen: {$location['notes']}\n";
-        }
+        
         
         $description .= "\n";
         
@@ -493,9 +491,6 @@ class CalendarService
             $description .= "- E-Mail: {$location['email']}\n";
         }
         
-        if (!empty($location['notes'])) {
-            $description .= "- Notizen: {$location['notes']}\n";
-        }
         
         $description .= "\n";
         
@@ -634,14 +629,39 @@ class CalendarService
         }
 
         $eventPath = $eventId . '.ics';
+        
+        // Validiere iCalendar Content vor dem Senden
+        $this->validateICalendarContent($icalContent, $eventId);
 
+        // Versuche zuerst mit If-Match Header
         $response = $this->davClient->request('PUT', $eventPath, $icalContent, [
             'Content-Type' => 'text/calendar',
-            'If-Match' => '*'  // Überschreibe existierenden Event
+            'If-Match' => '*'
         ]);
 
-        if ($response['statusCode'] >= 300) {
-            throw new \Exception('CalDAV Event konnte nicht aktualisiert werden: ' . $response['statusCode']);
+        // Wenn 412 (Precondition Failed), versuche ohne If-Match Header
+        if ($response['statusCode'] === 412) {
+            $this->logger->debug('If-Match fehlgeschlagen, versuche ohne Precondition', [
+                'event_id' => $eventId,
+                'event_path' => $eventPath
+            ]);
+            
+            $response = $this->davClient->request('PUT', $eventPath, $icalContent, [
+                'Content-Type' => 'text/calendar'
+            ]);
+        }
+
+        if ($response['statusCode'] >= 400) {
+            $errorDetails = [
+                'status_code' => $response['statusCode'],
+                'response_body' => $response['body'] ?? 'No response body',
+                'event_path' => $eventPath,
+                'caldav_url' => $this->config->get('calendar.caldav_url'),
+                'event_id' => $eventId
+            ];
+            
+            $errorMessage = $this->getDetailedCalDavError($response['statusCode'], $response['body'] ?? '', $errorDetails);
+            throw new \Exception($errorMessage);
         }
     }
 
@@ -907,6 +927,11 @@ class CalendarService
                        
             case 409:
                 return "{$baseMessage}: Konflikt - Event existiert bereits oder Versionsfehler. " .
+                       "Event ID: " . $errorDetails['event_id'];
+                       
+            case 412:
+                return "{$baseMessage}: Precondition Failed - If-Match Header Problem. " .
+                       "Der Event existiert möglicherweise nicht oder wurde zwischenzeitlich geändert. " .
                        "Event ID: " . $errorDetails['event_id'];
                        
             case 413:
