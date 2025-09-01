@@ -219,64 +219,122 @@ class PajApiService
     }
 
     /**
-     * Berechnet wie lange ein Fahrzeug bereits steht
+     * ÖFFENTLICHE Methode zur Berechnung der Stopp-Dauer (für CheckCommand)
+     */
+    public function getStopDuration(string $deviceId, ?int $currentTimestamp, ?float $currentSpeed): int
+    {
+        return $this->calculateStopDuration($deviceId, $currentTimestamp, $currentSpeed);
+    }
+
+    /**
+     * Berechnet wie lange ein Fahrzeug bereits steht - KORRIGIERTE VERSION
      */
     private function calculateStopDuration(string $deviceId, ?int $currentTimestamp, ?float $currentSpeed): int
     {
-        if (!$currentTimestamp || $currentSpeed === null || $currentSpeed >= 2) {
-            return 0; // Fahrzeug bewegt sich
+        if (!$currentTimestamp || $currentSpeed === null || $currentSpeed >= 5) {
+            return 0; // Fahrzeug bewegt sich deutlich (>5 km/h)
         }
-        
+
         try {
-            // Hole die letzten 50 Positionen um längere Standzeiten zu erkennen
+            // Hole die letzten 100 Positionen für bessere Standzeit-Erkennung
             $response = $this->httpClient->get("/api/v1/trackerdata/{$deviceId}/last_points", [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $this->accessToken,
                 ],
                 'query' => [
-                    'lastPoints' => 50,  // Erweitert von 10 auf 50 für bessere Standzeit-Erkennung
+                    'lastPoints' => 100,  // Mehr Datenpunkte für genauere Analyse
                     'gps' => 1
                 ]
             ]);
 
             $data = json_decode($response->getBody()->getContents(), true);
             $positions = $data['success'] ?? [];
-            
+
             if (empty($positions) || !is_array($positions)) {
                 return 0;
             }
-            
-            // Finde den Zeitpunkt wo das Fahrzeug gestoppt ist
+
+            $this->logger->debug('Stopp-Dauer Analyse', [
+                'device_id' => $deviceId,
+                'positions_count' => count($positions),
+                'current_speed' => $currentSpeed
+            ]);
+
+            // PAJ API gibt Positionen in umgekehrter Reihenfolge (neueste zuerst)
+            // Wir müssen vom aktuellen Zeitpunkt rückwärts gehen
+
             $stopStartTime = $currentTimestamp;
-            
-            // Iteriere rückwärts durch die Positionen
+            $minSpeedThreshold = 1.0; // 1 km/h als Grenze für "stehend"
+            $maxDriftDistance = 50; // 50 Meter Drift ist noch akzeptabel
+
+            // Referenzposition (aktuellste Position)
+            $referenceLat = $positions[0]['lat'] ?? null;
+            $referenceLon = $positions[0]['lng'] ?? null;
+
+            if ($referenceLat === null || $referenceLon === null) {
+                return 0;
+            }
+
+            // Gehe rückwärts durch die Positionen
             for ($i = 0; $i < count($positions); $i++) {
                 $pos = $positions[$i];
                 $speed = $pos['speed'] ?? 0;
-                
-                if ($speed >= 2) {
-                    // Hier hat sich das Fahrzeug noch bewegt
+                $timestamp = $pos['dateunix'] ?? null;
+                $lat = $pos['lat'] ?? null;
+                $lon = $pos['lng'] ?? null;
+
+                if ($timestamp === null || $lat === null || $lon === null) {
+                    continue;
+                }
+
+                // Prüfe ob Position noch in akzeptablem Drift-Bereich
+                $distance = $this->calculateDistance($referenceLat, $referenceLon, $lat, $lon);
+
+                // Prüfe ob Fahrzeug noch als "stehend" gilt
+                $isStillStanding = $speed < $minSpeedThreshold && $distance < $maxDriftDistance;
+
+                if ($isStillStanding) {
+                    // Fahrzeug steht noch - erweitere Stopp-Zeit
+                    $stopStartTime = $timestamp;
+                    $this->logger->debug('Stopp-Zeit erweitert', [
+                        'index' => $i,
+                        'timestamp' => date('H:i:s', $timestamp),
+                        'speed' => $speed,
+                        'distance' => round($distance, 1)
+                    ]);
+                } else {
+                    // Fahrzeug hat sich bewegt - Stopp endet hier
+                    $this->logger->debug('Stopp beendet durch Bewegung', [
+                        'index' => $i,
+                        'timestamp' => date('H:i:s', $timestamp),
+                        'speed' => $speed,
+                        'distance' => round($distance, 1)
+                    ]);
                     break;
                 }
-                
-                // Fahrzeug stand auch hier - setze Stopp-Start früher
-                $stopStartTime = $pos['dateunix'] ?? $stopStartTime;
             }
-            
+
             // Berechne Stopp-Dauer in Minuten
             $stopDurationSeconds = $currentTimestamp - $stopStartTime;
-            return max(0, round($stopDurationSeconds / 60));
-            
+            $stopDurationMinutes = round($stopDurationSeconds / 60);
+
+            $this->logger->debug('Stopp-Dauer berechnet', [
+                'device_id' => $deviceId,
+                'stop_duration_minutes' => $stopDurationMinutes,
+                'stop_start' => date('H:i:s', $stopStartTime),
+                'current_time' => date('H:i:s', $currentTimestamp)
+            ]);
+
+            return max(0, $stopDurationMinutes);
+
         } catch (\Exception $e) {
-            $this->logger->debug('Fehler beim Berechnen der Stopp-Dauer', [
+            $this->logger->error('Fehler beim Berechnen der Stopp-Dauer', [
                 'device_id' => $deviceId,
                 'error' => $e->getMessage()
             ]);
             return 0;
         }
-    }
-
-    public function getVehiclePosition(string $vehicleId): array
+    }    public function getVehiclePosition(string $vehicleId): array
     {
         // Wrapper für Rückwärtskompatibilität
         return $this->getDeviceLastPosition($vehicleId);
