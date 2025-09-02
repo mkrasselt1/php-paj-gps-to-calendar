@@ -12,6 +12,7 @@ use PajGpsCalendar\Console\Commands\TestCalendarCommand;
 use PajGpsCalendar\Console\Commands\AnalyzeCrmCommand;
 use PajGpsCalendar\Console\Commands\ConfigWizardCommand;
 use PajGpsCalendar\Console\Commands\SyncCrmToPajCommand;
+use PajGpsCalendar\Console\Commands\GoogleAuthCommand;
 use PajGpsCalendar\Console\Commands\MonitorVisitsCommand;
 
 class Application extends BaseApplication
@@ -35,7 +36,7 @@ class Application extends BaseApplication
         $this->add(new SyncCrmToPajCommand());
         $this->add(new MonitorVisitsCommand());
         
-        // Konfigurationsassistent
-        $this->add(new ConfigWizardCommand());
+        // Google Calendar Authentifizierung
+        $this->add(new GoogleAuthCommand());
     }
 }

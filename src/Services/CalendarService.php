@@ -3,6 +3,10 @@
 namespace PajGpsCalendar\Services;
 
 use Sabre\DAV\Client;
+use Google\Client as GoogleClient;
+use Google\Service\Calendar as GoogleCalendar;
+use Google\Service\Calendar\Event as GoogleEvent;
+use Google\Service\Calendar\EventDateTime;
 use Monolog\Logger;
 
 class CalendarService
@@ -10,6 +14,8 @@ class CalendarService
     private ConfigService $config;
     private Logger $logger;
     private ?Client $davClient = null;
+    private ?GoogleClient $googleClient = null;
+    private ?GoogleCalendar $googleCalendarService = null;
     private DatabaseService $database;
     private string $lastCreatedEventId = '';
 
@@ -20,6 +26,10 @@ class CalendarService
         
         if ($this->config->get('calendar.type') === 'caldav') {
             $this->initCalDavClient();
+        }
+        
+        if ($this->config->get('calendar.google_calendar.enabled', false)) {
+            $this->initGoogleClient();
         }
     }
 
@@ -32,6 +42,56 @@ class CalendarService
         ];
 
         $this->davClient = new Client($settings);
+    }
+
+    private function initGoogleClient(): void
+    {
+        $credentialsPath = $this->config->get('calendar.google_calendar.credentials_path');
+        
+        if (!file_exists($credentialsPath)) {
+            $this->logger->warning('Google Calendar Credentials nicht gefunden', [
+                'credentials_path' => $credentialsPath
+            ]);
+            return;
+        }
+
+        $this->googleClient = new GoogleClient();
+        $this->googleClient->setApplicationName($this->config->get('calendar.google_calendar.application_name', 'PAJ GPS to Calendar'));
+        $this->googleClient->setScopes([GoogleCalendar::CALENDAR_EVENTS]);
+        $this->googleClient->setAuthConfig($credentialsPath);
+        $this->googleClient->setAccessType('offline');
+        $this->googleClient->setPrompt('select_account consent');
+        $this->googleClient->setRedirectUri('urn:ietf:wg:oauth:2.0:oob'); // Für Desktop-Apps
+        
+        // Token-Datei für gespeicherte Tokens
+        $tokenPath = dirname($credentialsPath) . '/google-token.json';
+        
+        // Prüfe ob Token bereits vorhanden ist
+        if (file_exists($tokenPath)) {
+            $accessToken = json_decode(file_get_contents($tokenPath), true);
+            $this->googleClient->setAccessToken($accessToken);
+            
+            // Token refreshen falls nötig
+            if ($this->googleClient->isAccessTokenExpired()) {
+                $this->logger->info('Google Access Token ist abgelaufen, versuche Refresh');
+                try {
+                    $this->googleClient->fetchAccessTokenWithRefreshToken($this->googleClient->getRefreshToken());
+                    file_put_contents($tokenPath, json_encode($this->googleClient->getAccessToken()));
+                    $this->logger->info('Google Access Token erfolgreich erneuert');
+                } catch (\Exception $e) {
+                    $this->logger->error('Fehler beim Refresh des Google Access Tokens', [
+                        'error' => $e->getMessage()
+                    ]);
+                    // Token löschen, damit OAuth-Flow neu gestartet werden kann
+                    unlink($tokenPath);
+                    throw new \Exception('Google Access Token konnte nicht erneuert werden. Bitte führen Sie die Authentifizierung erneut durch.');
+                }
+            }
+        } else {
+            throw new \Exception('Google Calendar ist aktiviert, aber nicht authentifiziert. Führen Sie zuerst "php bin/paj-gps-calendar google-auth" aus.');
+        }
+        
+        $this->googleCalendarService = new GoogleCalendar($this->googleClient);
     }
 
     public function hasRecentEntry(array $vehicle, array $location): bool
@@ -47,17 +107,23 @@ class CalendarService
     public function hasExistingHistoricalEntry(array $vehicle, array $location, int $timestamp): bool
     {
         try {
-            if (!$this->davClient) {
-                throw new \Exception('CalDAV Client nicht initialisiert');
+            // Prüfe CalDAV falls verfügbar
+            if ($this->davClient) {
+                $expectedEventId = $this->generateHistoricalEventId($vehicle, $location, $timestamp);
+                $response = $this->davClient->request('GET', $expectedEventId . '.ics');
+                if ($response['statusCode'] === 200) {
+                    return true;
+                }
             }
 
-            $expectedEventId = $this->generateHistoricalEventId($vehicle, $location, $timestamp);
-            
-            // Prüfe auf spezifischen historischen Event
-            $response = $this->davClient->request('GET', $expectedEventId . '.ics');
-            
-            return $response['statusCode'] === 200;
-            
+            // Prüfe Google Calendar falls verfügbar
+            if ($this->googleCalendarService) {
+                return $this->hasExistingGoogleCalendarHistoricalEntry($vehicle, $location, $timestamp);
+            }
+
+            // Wenn kein Kalendersystem verfügbar ist, gehe davon aus dass kein Event existiert
+            return false;
+
         } catch (\Exception $e) {
             $this->logger->debug('Historische Event-Prüfung fehlgeschlagen', [
                 'vehicle' => $vehicle['name'],
@@ -77,10 +143,22 @@ class CalendarService
             
             $icalContent = $this->generateICalContent($vehicle, $location, $distance);
 
-            if ($this->config->get('calendar.type') === 'caldav') {
+            // Erstelle Eintrag in CalDAV Kalender (falls konfiguriert)
+            if ($this->config->get('calendar.type') === 'caldav' && $this->davClient) {
                 $this->createCalDavEvent($eventId, $icalContent);
-            } else {
-                throw new \Exception('Kalendertyp nicht unterstützt: ' . $this->config->get('calendar.type'));
+            }
+
+            // Erstelle Eintrag in Google Calendar (falls aktiviert)
+            if ($this->config->get('calendar.google_calendar.enabled', false)) {
+                $this->createGoogleCalendarEvent($vehicle, $location, $distance);
+            }
+
+            // Stelle sicher, dass mindestens ein Kalendersystem konfiguriert ist
+            $hasCalDav = $this->config->get('calendar.type') === 'caldav' && $this->davClient;
+            $hasGoogle = $this->config->get('calendar.google_calendar.enabled', false) && $this->googleCalendarService;
+            
+            if (!$hasCalDav && !$hasGoogle) {
+                throw new \Exception('Kein Kalendersystem konfiguriert oder verfügbar. Überprüfen Sie die calendar.type oder calendar.google_calendar.enabled Einstellungen.');
             }
 
             $this->logger->info('Kalendereintrag erstellt', [
@@ -130,7 +208,8 @@ class CalendarService
                 'end_time' => $endTime->format('Y-m-d H:i:s')
             ]);
 
-            if ($this->config->get('calendar.type') === 'caldav') {
+            // Erstelle historischen Eintrag in CalDAV Kalender (falls konfiguriert)
+            if ($this->config->get('calendar.type') === 'caldav' && $this->davClient) {
                 if ($forceUpdate) {
                     // Für Update: Erst prüfen ob Eintrag existiert, dann überschreiben
                     $this->updateCalDavEvent($eventId, $icalContent);
@@ -138,8 +217,19 @@ class CalendarService
                     // Normaler Create-Modus
                     $this->createCalDavEvent($eventId, $icalContent);
                 }
-            } else {
-                throw new \Exception('Kalendertyp nicht unterstützt: ' . $this->config->get('calendar.type'));
+            }
+
+            // Erstelle historischen Eintrag in Google Calendar (falls aktiviert)
+            if ($this->config->get('calendar.google_calendar.enabled', false)) {
+                $this->createHistoricalGoogleCalendarEvent($vehicle, $location, $distance, $startTime, $endTime, $forceUpdate);
+            }
+
+            // Stelle sicher, dass mindestens ein Kalendersystem konfiguriert ist
+            $hasCalDav = $this->config->get('calendar.type') === 'caldav' && $this->davClient;
+            $hasGoogle = $this->config->get('calendar.google_calendar.enabled', false) && $this->googleCalendarService;
+            
+            if (!$hasCalDav && !$hasGoogle) {
+                throw new \Exception('Kein Kalendersystem konfiguriert oder verfügbar. Überprüfen Sie die calendar.type oder calendar.google_calendar.enabled Einstellungen.');
             }
 
             $logAction = $forceUpdate ? 'aktualisiert' : 'erstellt';
@@ -209,6 +299,169 @@ class CalendarService
             $errorMessage = $this->getDetailedCalDavError($response['statusCode'], $response['body'] ?? '', $errorDetails);
             
             throw new \Exception($errorMessage);
+        }
+    }
+
+    private function createGoogleCalendarEvent(array $vehicle, array $location, float $distance): void
+    {
+        if (!$this->googleCalendarService) {
+            throw new \Exception('Google Calendar Service nicht initialisiert');
+        }
+
+        $timezone = $this->config->get('settings.timezone', 'Europe/Berlin');
+        $now = new \DateTime('now', new \DateTimeZone($timezone));
+        $eventStart = clone $now;
+        $eventEnd = (clone $now)->add(new \DateInterval('PT1H')); // 1 Stunde Dauer
+
+        $event = new GoogleEvent();
+        $event->setSummary("Fahrzeug {$vehicle['name']} bei {$location['customer_name']}");
+        $event->setDescription($this->generateEventDescription($vehicle, $location, $distance));
+        $event->setLocation($location['full_address'] ?? 'Adresse unbekannt');
+
+        $start = new EventDateTime();
+        $start->setDateTime($eventStart->format(\DateTime::RFC3339));
+        $start->setTimeZone($timezone);
+        $event->setStart($start);
+
+        $end = new EventDateTime();
+        $end->setDateTime($eventEnd->format(\DateTime::RFC3339));
+        $end->setTimeZone($timezone);
+        $event->setEnd($end);
+
+        $calendarId = $this->config->get('calendar.google_calendar.calendar_id', 'primary');
+
+        try {
+            $createdEvent = $this->googleCalendarService->events->insert($calendarId, $event);
+            $this->logger->info('Google Calendar Event erstellt', [
+                'event_id' => $createdEvent->getId(),
+                'calendar_id' => $calendarId,
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name']
+            ]);
+        } catch (\Exception $e) {
+            $this->logger->error('Fehler beim Erstellen des Google Calendar Events', [
+                'calendar_id' => $calendarId,
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name'],
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    private function createHistoricalGoogleCalendarEvent(array $vehicle, array $location, float $distance, \DateTime $startTime, \DateTime $endTime, bool $forceUpdate = false): void
+    {
+        if (!$this->googleCalendarService) {
+            throw new \Exception('Google Calendar Service nicht initialisiert');
+        }
+
+        $event = new GoogleEvent();
+        $event->setSummary("Fahrzeug {$vehicle['name']} bei {$location['customer_name']} (historisch)");
+        $event->setDescription($this->generateEventDescription($vehicle, $location, $distance) . "\n\nHistorischer Besuch");
+        $event->setLocation($location['full_address'] ?? 'Adresse unbekannt');
+
+        $start = new EventDateTime();
+        $start->setDateTime($startTime->format(\DateTime::RFC3339));
+        $start->setTimeZone($startTime->getTimezone()->getName());
+        $event->setStart($start);
+
+        $end = new EventDateTime();
+        $end->setDateTime($endTime->format(\DateTime::RFC3339));
+        $end->setTimeZone($endTime->getTimezone()->getName());
+        $event->setEnd($end);
+
+        $calendarId = $this->config->get('calendar.google_calendar.calendar_id', 'primary');
+
+        try {
+            if ($forceUpdate) {
+                // Versuche vorhandenes Event zu finden und zu aktualisieren
+                $existingEvents = $this->googleCalendarService->events->listEvents($calendarId, [
+                    'q' => "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}",
+                    'timeMin' => $startTime->format(\DateTime::RFC3339),
+                    'timeMax' => $endTime->format(\DateTime::RFC3339),
+                    'singleEvents' => true
+                ]);
+
+                if (count($existingEvents->getItems()) > 0) {
+                    $existingEvent = $existingEvents->getItems()[0];
+                    $updatedEvent = $this->googleCalendarService->events->update($calendarId, $existingEvent->getId(), $event);
+                    $this->logger->info('Google Calendar Event aktualisiert', [
+                        'event_id' => $updatedEvent->getId(),
+                        'calendar_id' => $calendarId
+                    ]);
+                } else {
+                    $createdEvent = $this->googleCalendarService->events->insert($calendarId, $event);
+                    $this->logger->info('Google Calendar Event erstellt', [
+                        'event_id' => $createdEvent->getId(),
+                        'calendar_id' => $calendarId
+                    ]);
+                }
+            } else {
+                $createdEvent = $this->googleCalendarService->events->insert($calendarId, $event);
+                $this->logger->info('Historisches Google Calendar Event erstellt', [
+                    'event_id' => $createdEvent->getId(),
+                    'calendar_id' => $calendarId,
+                    'vehicle' => $vehicle['name'],
+                    'customer' => $location['customer_name'],
+                    'start_time' => $startTime->format('Y-m-d H:i:s'),
+                    'end_time' => $endTime->format('Y-m-d H:i:s')
+                ]);
+            }
+        } catch (\Exception $e) {
+            $this->logger->error('Fehler beim Erstellen/Aktualisieren des historischen Google Calendar Events', [
+                'calendar_id' => $calendarId,
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name'],
+                'error' => $e->getMessage()
+            ]);
+            throw $e;
+        }
+    }
+
+    private function hasExistingGoogleCalendarHistoricalEntry(array $vehicle, array $location, int $timestamp): bool
+    {
+        if (!$this->googleCalendarService) {
+            return false;
+        }
+
+        try {
+            $calendarId = $this->config->get('calendar.google_calendar.calendar_id', 'primary');
+
+            // Erstelle Suchkriterien für ähnliche Events
+            $startTime = date('c', $timestamp); // ISO 8601 Format
+            $endTime = date('c', $timestamp + 3600); // 1 Stunde später
+
+            // Suche nach Events mit ähnlichem Titel im Zeitbereich
+            $eventTitle = "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}";
+
+            $events = $this->googleCalendarService->events->listEvents($calendarId, [
+                'q' => $eventTitle,
+                'timeMin' => $startTime,
+                'timeMax' => $endTime,
+                'singleEvents' => true,
+                'orderBy' => 'startTime'
+            ]);
+
+            if ($events->getItems()) {
+                $this->logger->debug('Existierendes Google Calendar Event gefunden', [
+                    'vehicle' => $vehicle['name'],
+                    'customer' => $location['customer_name'],
+                    'timestamp' => date('Y-m-d H:i:s', $timestamp),
+                    'found_events' => count($events->getItems())
+                ]);
+                return true;
+            }
+
+            return false;
+
+        } catch (\Exception $e) {
+            $this->logger->debug('Google Calendar Event-Prüfung fehlgeschlagen', [
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name'],
+                'timestamp' => date('Y-m-d H:i:s', $timestamp),
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 
@@ -705,10 +958,12 @@ class CalendarService
     {
         try {
             if (!$this->davClient) {
-                throw new \Exception('CalDAV Client nicht initialisiert');
+                // Prüfe Google Calendar falls verfügbar
+                if ($this->googleCalendarService && $this->hasExistingGoogleCalendarEntry($vehicle, $location)) {
+                    return 'google-calendar-event';
+                }
+                throw new \Exception('CalDAV Client nicht initialisiert und kein Google Calendar verfügbar');
             }
-
-            $expectedEventId = $this->generateEventId($vehicle, $location);
             
             // Einfachere Duplikatserkennung: Prüfe auf Event-Name-Pattern für heute
             $today = date('Ymd');
@@ -757,6 +1012,51 @@ class CalendarService
                 'error' => $e->getMessage()
             ]);
             return null;
+        }
+    }
+
+    private function hasExistingGoogleCalendarEntry(array $vehicle, array $location): bool
+    {
+        if (!$this->googleCalendarService) {
+            return false;
+        }
+
+        try {
+            $calendarId = $this->config->get('calendar.google_calendar.calendar_id', 'primary');
+
+            // Suche nach Events mit ähnlichem Titel für heute
+            $today = date('Y-m-d');
+            $startTime = $today . 'T00:00:00Z';
+            $endTime = $today . 'T23:59:59Z';
+
+            $eventTitle = "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}";
+
+            $events = $this->googleCalendarService->events->listEvents($calendarId, [
+                'q' => $eventTitle,
+                'timeMin' => $startTime,
+                'timeMax' => $endTime,
+                'singleEvents' => true,
+                'orderBy' => 'startTime'
+            ]);
+
+            if ($events->getItems()) {
+                $this->logger->debug('Existierendes Google Calendar Event gefunden', [
+                    'vehicle' => $vehicle['name'],
+                    'customer' => $location['customer_name'],
+                    'found_events' => count($events->getItems())
+                ]);
+                return true;
+            }
+
+            return false;
+
+        } catch (\Exception $e) {
+            $this->logger->debug('Google Calendar Event-Prüfung fehlgeschlagen', [
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name'],
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 
