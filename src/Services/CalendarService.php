@@ -103,6 +103,7 @@ class CalendarService
 
     /**
      * Prüft ob bereits ein historischer Kalendereintrag für diesen Besuch existiert
+     * Diese Methode prüft nur, ob das Event bereits einmal verarbeitet wurde
      */
     public function hasExistingHistoricalEntry(array $vehicle, array $location, int $timestamp): bool
     {
@@ -112,16 +113,30 @@ class CalendarService
                 $expectedEventId = $this->generateHistoricalEventId($vehicle, $location, $timestamp);
                 $response = $this->davClient->request('GET', $expectedEventId . '.ics');
                 if ($response['statusCode'] === 200) {
+                    $this->logger->debug('Existierender historischer CalDAV Event gefunden', [
+                        'vehicle' => $vehicle['name'],
+                        'customer' => $location['customer_name'],
+                        'timestamp' => date('Y-m-d H:i:s', $timestamp),
+                        'event_id' => $expectedEventId
+                    ]);
                     return true;
                 }
             }
 
             // Prüfe Google Calendar falls verfügbar
             if ($this->googleCalendarService) {
-                return $this->hasExistingGoogleCalendarHistoricalEntry($vehicle, $location, $timestamp);
+                $existsInGoogle = $this->hasExistingGoogleCalendarHistoricalEntry($vehicle, $location, $timestamp);
+                if ($existsInGoogle) {
+                    $this->logger->debug('Existierender historischer Google Calendar Event gefunden', [
+                        'vehicle' => $vehicle['name'],
+                        'customer' => $location['customer_name'],
+                        'timestamp' => date('Y-m-d H:i:s', $timestamp)
+                    ]);
+                    return true;
+                }
             }
 
-            // Wenn kein Kalendersystem verfügbar ist, gehe davon aus dass kein Event existiert
+            // Kein existierender historischer Event gefunden
             return false;
 
         } catch (\Exception $e) {
@@ -314,7 +329,7 @@ class CalendarService
         $eventEnd = (clone $now)->add(new \DateInterval('PT1H')); // 1 Stunde Dauer
 
         $event = new GoogleEvent();
-        $event->setSummary("Fahrzeug {$vehicle['name']} bei {$location['customer_name']}");
+        $event->setSummary("{$vehicle['name']} bei {$location['customer_name']}");
         $event->setDescription($this->generateEventDescription($vehicle, $location, $distance));
         $event->setLocation($location['full_address'] ?? 'Adresse unbekannt');
 
@@ -356,7 +371,7 @@ class CalendarService
         }
 
         $event = new GoogleEvent();
-        $event->setSummary("Fahrzeug {$vehicle['name']} bei {$location['customer_name']} (historisch)");
+        $event->setSummary("{$vehicle['name']} bei {$location['customer_name']} (historisch)");
         $event->setDescription($this->generateEventDescription($vehicle, $location, $distance) . "\n\nHistorischer Besuch");
         $event->setLocation($location['full_address'] ?? 'Adresse unbekannt');
 
@@ -376,7 +391,7 @@ class CalendarService
             if ($forceUpdate) {
                 // Versuche vorhandenes Event zu finden und zu aktualisieren
                 $existingEvents = $this->googleCalendarService->events->listEvents($calendarId, [
-                    'q' => "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}",
+                    'q' => "{$vehicle['name']} bei {$location['customer_name']}",
                     'timeMin' => $startTime->format(\DateTime::RFC3339),
                     'timeMax' => $endTime->format(\DateTime::RFC3339),
                     'singleEvents' => true
@@ -432,7 +447,7 @@ class CalendarService
             $endTime = date('c', $timestamp + 3600); // 1 Stunde später
 
             // Suche nach Events mit ähnlichem Titel im Zeitbereich
-            $eventTitle = "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}";
+            $eventTitle = "{$vehicle['name']} bei {$location['customer_name']}";
 
             $events = $this->googleCalendarService->events->listEvents($calendarId, [
                 'q' => $eventTitle,
@@ -502,7 +517,7 @@ class CalendarService
         $uid = $this->generateEventId($vehicle, $location);
         
         // iCalendar-konformes Escaping für alle Textfelder
-        $summary = $this->escapeICalText("Fahrzeug {$vehicle['name']} bei {$location['customer_name']}");
+        $summary = $this->escapeICalText("{$vehicle['name']} bei {$location['customer_name']}");
         $description = $this->escapeICalText($this->generateEventDescription($vehicle, $location, $distance));
         $locationText = $this->escapeICalText($location['full_address'] ?? 'Adresse unbekannt');
         
@@ -539,7 +554,7 @@ class CalendarService
         $uid = $this->generateHistoricalEventId($vehicle, $location, $startTime->getTimestamp());
         
         // iCalendar-konformes Escaping für alle Textfelder
-        $summary = $this->escapeICalText("Fahrzeug {$vehicle['name']} bei {$location['customer_name']}");
+        $summary = $this->escapeICalText("{$vehicle['name']} bei {$location['customer_name']}");
         $description = $this->escapeICalText($this->generateHistoricalEventDescription($vehicle, $location, $distance, $startTime, $endTime));
         $locationText = $this->escapeICalText($location['full_address'] ?? 'Adresse unbekannt');
         
@@ -645,7 +660,7 @@ class CalendarService
 
     private function generateEventDescription(array $vehicle, array $location, float $distance): string
     {
-        $description = "Fahrzeugbesuch bei Kunde erfasst\n\n";
+        $description = "Besuch bei Kunde erfasst\n\n";
         
         // Fahrzeug-Informationen
         $description .= "FAHRZEUG:\n";
@@ -707,7 +722,7 @@ class CalendarService
     {
         $durationMinutes = round(($endTime->getTimestamp() - $startTime->getTimestamp()) / 60);
         
-        $description = "Fahrzeugbesuch bei Kunde erfasst (Historische Daten)\n\n";
+        $description = "Besuch bei Kunde erfasst (Historische Daten)\n\n";
         
         // Besuchszeiten
         $description .= "BESUCHSZEITEN:\n";
@@ -833,7 +848,7 @@ class CalendarService
         $now = new \DateTime('now', new \DateTimeZone($timezone));
 
         $uid = $eventId; // Verwende die übergebene Event-ID
-        $summary = "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}";
+        $summary = "{$vehicle['name']} bei {$location['customer_name']}";
         $description = $this->generateEventDescriptionWithDuration($vehicle, $location, $distance, $startTime, $endTime);
         
         $ical = "BEGIN:VCALENDAR\r\n";
@@ -926,7 +941,7 @@ class CalendarService
         $durationMinutes = round(($endTime->getTimestamp() - $startTime->getTimestamp()) / 60);
         $timezone = $this->config->get('settings.timezone', 'Europe/Berlin');
         
-        $description = "Fahrzeugbesuch bei Kunde erfasst\\n\\n";
+        $description = "Besuch bei Kunde erfasst\\n\\n";
         $description .= "BESUCHSZEITEN:\\n";
         $description .= "- Ankunft: " . $startTime->format('d.m.Y H:i:s') . "\\n";
         $description .= "- Abfahrt: " . $endTime->format('d.m.Y H:i:s') . "\\n";
@@ -953,60 +968,63 @@ class CalendarService
 
     /**
      * Prüft ob bereits ein Kalendereintrag für diesen Besuch existiert
+     * Diese Methode prüft nur, ob das Event bereits einmal verarbeitet wurde
      */
     public function hasExistingEntry(array $vehicle, array $location): ?string
     {
         try {
-            if (!$this->davClient) {
-                // Prüfe Google Calendar falls verfügbar
-                if ($this->googleCalendarService && $this->hasExistingGoogleCalendarEntry($vehicle, $location)) {
-                    return 'google-calendar-event';
-                }
-                throw new \Exception('CalDAV Client nicht initialisiert und kein Google Calendar verfügbar');
-            }
-            
-            // Einfachere Duplikatserkennung: Prüfe auf Event-Name-Pattern für heute
-            $today = date('Ymd');
-            $vehicleIdClean = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id']);
-            $customerId = $location['customer_id'] ?? $location['id'] ?? 0;
-            
-            // PROPFIND Anfrage für Events mit ähnlichem Namen
-            $response = $this->davClient->propfind('', [
-                '{DAV:}displayname',
-                '{DAV:}getcontenttype'
-            ], 1);
-            
-            if (isset($response)) {
-                foreach ($response as $path => $properties) {
-                    if (is_string($path)) {
-                        $fileName = basename($path, '.ics');
-                        
-                        // Prüfe auf Pattern: paj-gps-[vehicleId]-[customerId]-[heute oder timestamp]
-                        if (strpos($fileName, "paj-gps-{$vehicleIdClean}-{$customerId}-") === 0 &&
-                            (strpos($fileName, $today) !== false || 
-                             preg_match("/paj-gps-{$vehicleIdClean}-{$customerId}-\d{8}/", $fileName))) {
-                            
-                            $this->logger->debug('Existierender Event gefunden', [
-                                'vehicle' => $vehicle['name'],
-                                'customer' => $location['customer_name'],
-                                'found_event' => $fileName
-                            ]);
-                            return $fileName;
+            // Prüfe CalDAV falls verfügbar
+            if ($this->davClient) {
+                // Einfachere Duplikatserkennung: Prüfe auf Event-Name-Pattern für heute
+                $today = date('Ymd');
+                $vehicleIdClean = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id']);
+                $customerId = $location['customer_id'] ?? $location['id'] ?? 0;
+
+                // PROPFIND Anfrage für Events mit ähnlichem Namen
+                $response = $this->davClient->propfind('', [
+                    '{DAV:}displayname',
+                    '{DAV:}getcontenttype'
+                ], 1);
+
+                if (isset($response)) {
+                    foreach ($response as $path => $properties) {
+                        if (is_string($path)) {
+                            $fileName = basename($path, '.ics');
+
+                            // Prüfe auf Pattern: paj-gps-[vehicleId]-[customerId]-[heute oder timestamp]
+                            if (strpos($fileName, "paj-gps-{$vehicleIdClean}-{$customerId}-") === 0 &&
+                                (strpos($fileName, $today) !== false ||
+                                 preg_match("/paj-gps-{$vehicleIdClean}-{$customerId}-\d{8}/", $fileName))) {
+
+                                $this->logger->debug('Existierender CalDAV Event gefunden', [
+                                    'vehicle' => $vehicle['name'],
+                                    'customer' => $location['customer_name'],
+                                    'found_event' => $fileName
+                                ]);
+                                return $fileName;
+                            }
                         }
                     }
                 }
             }
-            
-            $this->logger->debug('Kein existierender Event gefunden', [
-                'vehicle' => $vehicle['name'],
-                'customer' => $location['customer_name'],
-                'expected_pattern' => "paj-gps-{$vehicleIdClean}-{$customerId}-{$today}*"
-            ]);
-            
+
+            // Prüfe Google Calendar falls verfügbar
+            if ($this->googleCalendarService) {
+                $existsInGoogle = $this->hasExistingGoogleCalendarEntry($vehicle, $location);
+                if ($existsInGoogle) {
+                    $this->logger->debug('Existierender Google Calendar Event gefunden', [
+                        'vehicle' => $vehicle['name'],
+                        'customer' => $location['customer_name']
+                    ]);
+                    return 'google-calendar-event';
+                }
+            }
+
+            // Kein existierender Event gefunden
             return null;
-            
+
         } catch (\Exception $e) {
-            $this->logger->debug('Event-Prüfung fehlgeschlagen', [
+            $this->logger->error('Fehler bei der Duplikatserkennung', [
                 'vehicle' => $vehicle['name'],
                 'customer' => $location['customer_name'],
                 'error' => $e->getMessage()
@@ -1029,7 +1047,7 @@ class CalendarService
             $startTime = $today . 'T00:00:00Z';
             $endTime = $today . 'T23:59:59Z';
 
-            $eventTitle = "Fahrzeug {$vehicle['name']} bei {$location['customer_name']}";
+            $eventTitle = "{$vehicle['name']} bei {$location['customer_name']}";
 
             $events = $this->googleCalendarService->events->listEvents($calendarId, [
                 'q' => $eventTitle,

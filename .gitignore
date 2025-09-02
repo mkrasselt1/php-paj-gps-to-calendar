@@ -122,3 +122,5 @@ development.md
 *.todo
 *.notes
 config/config-adressen.yaml
+config/google-token.json
+config/google-credentials.json
