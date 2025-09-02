@@ -85,18 +85,28 @@ class CheckCommand extends Command
                     continue;
                 }
                 
-                // ✨ HYBRIDE STANDZEIT-BERECHNUNG: PAJ + VisitDurationService
-                $speed = $vehicle['speed'] ?? 0;  // Direkte PAJ-Geschwindigkeit verwenden
+                // ✨ VERBESSERTE STOPDURATION: Priorisiere PAJ-API-Daten
+                $speed = $vehicle['speed'] ?? 0;
                 $pajStopDuration = $vehicle['stop_duration_minutes'] ?? 0;
-                $movementDetected = $speed > 1;  // Einfache Bewegungserkennung basierend auf PAJ-Speed
-                
-                // Verwende VisitDurationService für bessere Standzeit bei stehenden Fahrzeugen
-                if (!$movementDetected && $pajStopDuration > 0) {
-                    // Für stehende Fahrzeuge: Nutze VisitDurationService für präzisere Standzeit
-                    $visitAnalysis = $visitDuration->trackPosition($vehicle);
-                    $stopDuration = max($pajStopDuration, $visitAnalysis['visit_duration_minutes']);
-                } else {
-                    $stopDuration = $pajStopDuration;
+                $movementDetected = $speed > 1;
+
+                // Intelligente Logik: PAJ-API-Daten haben Priorität
+                $stopDuration = $pajStopDuration;
+
+                // Nur wenn PAJ-Daten gering sind UND Fahrzeug steht: detaillierte Analyse
+                if ($pajStopDuration < 1 && !$movementDetected) {
+                    try {
+                        $detailedDuration = $pajApi->getStopDuration(
+                            $vehicle['id'],
+                            $vehicle['timestamp'] ?? time(),
+                            $speed
+                        );
+                        if ($detailedDuration > $stopDuration) {
+                            $stopDuration = $detailedDuration;
+                        }
+                    } catch (\Exception $e) {
+                        // Bei Fehler: PAJ-Daten behalten
+                    }
                 }
                 
                 $movementIcon = $movementDetected ? '�' : '�';
@@ -152,32 +162,29 @@ class CheckCommand extends Command
                         continue;
                     }
                     
-                    // ✨ VEREINFACHTE BESUCHSERKENNUNG basierend auf Standort und Bewegung:
+                    // ✨ VERBESSERTE BESUCHSERKENNUNG mit intelligenter StopDuration
                     $shouldCreateEntry = false;
                     $reason = '';
-                    
-                    // 1. Hauptkriterium: Keine Bewegung + Mindestaufenthaltsdauer
-                    if (!$movementDetected && $stopDuration >= $minimumVisitDuration && $speed < 1) {
+
+                    // 1. Haupt-Kriterium: Mindestaufenthaltsdauer erreicht
+                    if ($stopDuration >= 1 && $speed < 2) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, keine Bewegung, %.1f km/h', $stopDuration, $speed);
+                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, %.1f km/h', $stopDuration, $speed);
                     }
-                    // 2. Längerer Stopp auch bei geringer Bewegung (z.B. GPS-Drift)
-                    else if ($stopDuration >= ($minimumVisitDuration * 2) && $speed < 2) {
+                    // 2. Längerer Stopp mit geringer Bewegung (GPS-Drift erlaubt)
+                    else if ($stopDuration >= 3 && $speed < 5) {
                         $shouldCreateEntry = true;
-                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, minimal bewegt (%.1f km/h)', $stopDuration, $speed);
+                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, geringe Bewegung (%.1f km/h)', $stopDuration, $speed);
                     }
                     // 3. Sehr langer Stopp - definitiv ein Besuch
-                    else if ($stopDuration >= ($minimumVisitDuration * 5)) {
+                    else if ($stopDuration >= 10) {
                         $shouldCreateEntry = true;
                         $reason = sprintf('✅ Besuch erkannt: Sehr langer Aufenthalt (%d Min)', $stopDuration);
                     }
                     // 4. Kriterien noch nicht erfüllt - warten
                     else {
-                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden (braucht %d Min), %.1f km/h, %s', 
-                            $stopDuration, 
-                            $minimumVisitDuration,
-                            $speed,
-                            $movementDetected ? 'Bewegung erkannt' : 'keine Bewegung'
+                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden (braucht 1 Min), %.1f km/h',
+                            $stopDuration, $speed
                         );
                     }
                     
