@@ -673,7 +673,17 @@ class CalendarService
         }
         
         if (isset($vehicle['timestamp'])) {
-            $description .= "- Erkannt am: " . date('d.m.Y H:i:s', strtotime($vehicle['timestamp'])) . "\n";
+            // Korrigiere Zeitzonen-Problem: PAJ liefert UTC, konvertiere zu lokaler Zeit
+            $timestamp = $vehicle['timestamp'];
+            if (is_numeric($timestamp)) {
+                // Unix-Timestamp von PAJ (UTC) - konvertiere zu lokaler Zeit
+                $dateTime = new \DateTime('@' . $timestamp);
+                $dateTime->setTimezone(new \DateTimeZone(date_default_timezone_get()));
+                $description .= "- Erkannt am: " . $dateTime->format('d.m.Y H:i:s') . "\n";
+            } else {
+                // Fallback für String-Timestamps
+                $description .= "- Erkannt am: " . date('d.m.Y H:i:s', strtotime($timestamp)) . "\n";
+            }
         }
         
         $description .= "\n";

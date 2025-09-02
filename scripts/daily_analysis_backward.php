@@ -12,8 +12,8 @@ use Symfony\Component\Console\Output\ConsoleOutput;
 use PajGpsCalendar\Console\Commands\HistoryCommand;
 
 // Konfiguration
-$startDate = new DateTime('2025-08-22', new DateTimeZone('Europe/Berlin')); // Heute
-$endDate = new DateTime('2025-08-22', new DateTimeZone('Europe/Berlin'));   // Nur heute
+$startDate = new DateTime('2024-09-02', new DateTimeZone('Europe/Berlin')); // Heute
+$endDate = new DateTime('2025-09-02', new DateTimeZone('Europe/Berlin'));   // Nur heute
 $dryRun = false; // Auf true setzen für Test-Modus
 $delaySeconds = 1; // Pause zwischen den Tagen (um Server zu schonen)
 
@@ -52,6 +52,7 @@ while ($currentDate >= $endDate) {
             'command' => 'history',
             '--from' => $currentDate->format('d.m.Y'),
             '--to' => $currentDate->format('d.m.Y'),
+            '--force-update' => true
         ]);
         
         // Dry-Run Parameter hinzufügen falls aktiviert
