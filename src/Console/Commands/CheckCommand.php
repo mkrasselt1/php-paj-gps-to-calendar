@@ -14,6 +14,7 @@ use PajGpsCalendar\Services\CrmService;
 use PajGpsCalendar\Services\GeoService;
 use PajGpsCalendar\Services\VisitDurationService;
 use PajGpsCalendar\Services\BlindSpotService;
+use PajGpsCalendar\Helpers\PathHelper;
 use Monolog\Logger;
 use Monolog\Handler\StreamHandler;
 
@@ -269,6 +270,7 @@ class CheckCommand extends Command
         // Logger einrichten
         $this->logger = new Logger('paj-gps-calendar');
         $logFile = $this->config->get('settings.log_file', 'logs/application.log');
+        $logFile = PathHelper::resolveProjectPath($logFile);
         $logLevel = $this->config->get('settings.log_level', 'info');
         
         $this->logger->pushHandler(new StreamHandler($logFile, $logLevel));

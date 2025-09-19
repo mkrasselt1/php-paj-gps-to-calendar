@@ -10,6 +10,7 @@ use Symfony\Component\Console\Application;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\ConsoleOutput;
 use PajGpsCalendar\Console\Commands\HistoryCommand;
+use PajGpsCalendar\Helpers\PathHelper;
 
 // Konfiguration
 $startDate = new DateTime('2024-09-02', new DateTimeZone('Europe/Berlin')); // Heute
@@ -114,8 +115,10 @@ if ($dryRun) {
 $output->writeln('');
 $output->writeln('<info>🎉 Bulk-Analyse beendet!</info>');
 
-// Speichere eine kleine Statistik-Datei
-$statsFile = __DIR__ . '/../logs/bulk_analysis_' . date('Y-m-d_H-i-s') . '.log';
+// Speichere eine kleine Statistik-Datei (Windows-kompatible Pfad-Erstellung)
+$logsDir = PathHelper::resolveProjectPath('logs');
+PathHelper::ensureDirectoryExists($logsDir);
+$statsFile = $logsDir . DIRECTORY_SEPARATOR . 'bulk_analysis_' . date('Y-m-d_H-i-s') . '.log';
 file_put_contents($statsFile, sprintf(
     "PAJ GPS Bulk Analysis Report\n" .
     "============================\n" .

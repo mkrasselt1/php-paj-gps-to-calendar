@@ -426,7 +426,11 @@ class ConfigWizardCommand extends Command
 
             // Logger testen
             $logger = new Logger('config-test');
-            $logger->pushHandler(new StreamHandler(__DIR__ . '/../../../logs/config-test.log'));
+            $projectRoot = realpath(__DIR__ . '/../../../');
+            if (!$projectRoot) {
+                $projectRoot = dirname(dirname(dirname(__DIR__)));
+            }
+            $logger->pushHandler(new StreamHandler($projectRoot . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . 'config-test.log'));
             $this->output->writeln('<info>✓ Logging erfolgreich initialisiert</info>');
 
             // Geo Service testen

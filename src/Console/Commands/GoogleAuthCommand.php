@@ -48,7 +48,18 @@ class GoogleAuthCommand extends Command
             }
 
             $credentialsPath = $config->get('calendar.google_calendar.credentials_path');
-            $tokenPath = dirname($credentialsPath) . '/google-token.json';
+            
+            // Windows-kompatible Pfad-Behandlung für relative Pfade
+            $isAbsolute = (strpos($credentialsPath, '/') === 0) || (preg_match('/^[A-Za-z]:/', $credentialsPath));
+            if (!$isAbsolute) {
+                $projectRoot = realpath(__DIR__ . '/../../../');
+                if (!$projectRoot) {
+                    $projectRoot = dirname(dirname(dirname(__DIR__)));
+                }
+                $credentialsPath = $projectRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $credentialsPath);
+            }
+            
+            $tokenPath = dirname($credentialsPath) . DIRECTORY_SEPARATOR . 'google-token.json';
 
             // Credentials-Datei prüfen
             if (!file_exists($credentialsPath)) {

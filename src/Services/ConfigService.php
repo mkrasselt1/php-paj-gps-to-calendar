@@ -3,6 +3,7 @@
 namespace PajGpsCalendar\Services;
 
 use Symfony\Component\Yaml\Yaml;
+use PajGpsCalendar\Helpers\PathHelper;
 
 class ConfigService
 {
@@ -10,7 +11,7 @@ class ConfigService
 
     public function __construct(string $configFile = null)
     {
-        $configFile = $configFile ?: __DIR__ . '/../../config/config.yaml';
+        $configFile = $configFile ?: PathHelper::resolveProjectPath('config/config.yaml');
         
         if (!file_exists($configFile)) {
             throw new \Exception("Konfigurationsdatei nicht gefunden: {$configFile}");

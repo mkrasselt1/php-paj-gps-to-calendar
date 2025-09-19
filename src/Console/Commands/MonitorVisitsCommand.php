@@ -177,6 +177,16 @@ class MonitorVisitsCommand extends Command
         
         $this->logger = new Logger('monitor');
         $logFile = $this->config->get('settings.log_file', 'logs/application.log');
+        
+        // Windows-kompatible Pfad-Behandlung für relative Pfade
+        $isAbsolute = (strpos($logFile, '/') === 0) || (preg_match('/^[A-Za-z]:/', $logFile));
+        if (!$isAbsolute) {
+            $projectRoot = realpath(__DIR__ . '/../../../');
+            if (!$projectRoot) {
+                $projectRoot = dirname(dirname(dirname(__DIR__)));
+            }
+            $logFile = $projectRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $logFile);
+        }
         $this->logger->pushHandler(new StreamHandler($logFile));
     }
 }

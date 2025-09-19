@@ -359,6 +359,16 @@ class HistoryCommand extends Command
         // Logger einrichten
         $this->logger = new Logger('paj-gps-calendar');
         $logFile = $this->config->get('settings.log_file', 'logs/application.log');
+        
+        // Windows-kompatible Pfad-Behandlung für relative Pfade
+        $isAbsolute = (strpos($logFile, '/') === 0) || (preg_match('/^[A-Za-z]:/', $logFile));
+        if (!$isAbsolute) {
+            $projectRoot = realpath(__DIR__ . '/../../../');
+            if (!$projectRoot) {
+                $projectRoot = dirname(dirname(dirname(__DIR__)));
+            }
+            $logFile = $projectRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $logFile);
+        }
         $logLevel = $this->config->get('settings.log_level', 'info');
         
         $this->logger->pushHandler(new StreamHandler($logFile, $logLevel));

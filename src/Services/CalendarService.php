@@ -48,6 +48,16 @@ class CalendarService
     {
         $credentialsPath = $this->config->get('calendar.google_calendar.credentials_path');
         
+        // Windows-kompatible Pfad-Behandlung für relative Pfade
+        $isAbsolute = (strpos($credentialsPath, '/') === 0) || (preg_match('/^[A-Za-z]:/', $credentialsPath));
+        if (!$isAbsolute) {
+            $projectRoot = realpath(__DIR__ . '/../../');
+            if (!$projectRoot) {
+                $projectRoot = dirname(dirname(__DIR__));
+            }
+            $credentialsPath = $projectRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $credentialsPath);
+        }
+        
         if (!file_exists($credentialsPath)) {
             $this->logger->warning('Google Calendar Credentials nicht gefunden', [
                 'credentials_path' => $credentialsPath
@@ -64,7 +74,7 @@ class CalendarService
         $this->googleClient->setRedirectUri('urn:ietf:wg:oauth:2.0:oob'); // Für Desktop-Apps
         
         // Token-Datei für gespeicherte Tokens
-        $tokenPath = dirname($credentialsPath) . '/google-token.json';
+        $tokenPath = dirname($credentialsPath) . DIRECTORY_SEPARATOR . 'google-token.json';
         
         // Prüfe ob Token bereits vorhanden ist
         if (file_exists($tokenPath)) {
