@@ -508,13 +508,27 @@ class CalendarService
     public function generateHistoricalEventId(array $vehicle, array $location, int $timestamp): string
     {
         $vehicleId = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id'] ?? 'unknown');
-        $locationId = $location['customer_id'] ?? 'unknown';
+        $locationId = preg_replace('/[^a-zA-Z0-9]/', '', $location['customer_id'] ?? 'unknown');
         
         // Verwende das tatsächliche Besuchsdatum
         $dateOnly = date('Ymd', $timestamp);
         $timeHour = date('Hi', $timestamp); // Stunde+Minute für Eindeutigkeit bei mehreren Besuchen am Tag
         
-        return "paj-gps-{$vehicleId}-{$locationId}-{$dateOnly}-{$timeHour}";
+        $eventId = "paj-gps-{$vehicleId}-{$locationId}-{$dateOnly}-{$timeHour}";
+        
+        // Debug-Logging für Event-ID-Generierung
+        $this->logger->debug('Event-ID generiert', [
+            'vehicle_id_raw' => $vehicle['id'] ?? 'unknown',
+            'vehicle_id_clean' => $vehicleId,
+            'customer_id_raw' => $location['customer_id'] ?? 'unknown',
+            'customer_id_clean' => $locationId,
+            'timestamp' => $timestamp,
+            'date' => $dateOnly,
+            'time' => $timeHour,
+            'final_event_id' => $eventId
+        ]);
+        
+        return $eventId;
     }
 
     private function generateICalContent(array $vehicle, array $location, float $distance): string
@@ -816,37 +830,137 @@ class CalendarService
 
     /**
      * Aktualisiert einen bestehenden Kalendereintrag mit der tatsächlichen Endzeit
+     * Behandelt CalDAV und Google Calendar unabhängig voneinander
      */
     public function updateEntryWithEndTime(string $eventId, array $vehicle, array $location, float $distance): bool
     {
+        $hasSuccess = false;
+        $hasErrors = false;
+        $errors = [];
+        
         try {
-            // Hole den existierenden Event um die Start-Zeit zu bekommen
-            $existingEvent = $this->getEventContent($eventId);
-            if (!$existingEvent) {
-                throw new \Exception('Existierender Event konnte nicht gefunden werden');
-            }
-            
-            $startTime = $existingEvent['start_time'];
-            $endTime = new \DateTime(); // Jetzt als Endzeit
-            
-            $icalContent = $this->generateICalContentWithTimes($eventId, $vehicle, $location, $distance, $startTime, $endTime);
-
-            if ($this->config->get('calendar.type') === 'caldav') {
-                $this->updateCalDavEvent($eventId, $icalContent);
-            } else {
-                throw new \Exception('Kalendertyp nicht unterstützt: ' . $this->config->get('calendar.type'));
-            }
-
-            $this->logger->info('Kalendereintrag mit Endzeit aktualisiert', [
-                'vehicle' => $vehicle['name'],
-                'customer' => $location['customer_name'],
+            $this->logger->info('Versuche Kalendereintrag zu aktualisieren', [
                 'event_id' => $eventId,
-                'start_time' => $startTime->format('Y-m-d H:i:s'),
-                'end_time' => $endTime->format('Y-m-d H:i:s'),
-                'duration_minutes' => round(($endTime->getTimestamp() - $startTime->getTimestamp()) / 60)
+                'vehicle' => $vehicle['name'],
+                'customer' => $location['customer_name']
             ]);
-
-            return true;
+            
+            // **CALDAV UPDATE** (falls CalDAV aktiviert ist)
+            if ($this->config->get('calendar.type') === 'caldav' && $this->davClient) {
+                try {
+                    $this->logger->debug('Versuche CalDAV Event zu aktualisieren', ['event_id' => $eventId]);
+                    
+                    // Hole den existierenden CalDAV Event
+                    $existingEvent = $this->getEventContent($eventId);
+                    if ($existingEvent) {
+                        $startTime = $existingEvent['start_time'];
+                        $endTime = new \DateTime(); // Jetzt als Endzeit
+                        
+                        $icalContent = $this->generateICalContentWithTimes($eventId, $vehicle, $location, $distance, $startTime, $endTime);
+                        $this->updateCalDavEvent($eventId, $icalContent);
+                        
+                        $this->logger->info('CalDAV Kalendereintrag erfolgreich aktualisiert', [
+                            'event_id' => $eventId,
+                            'vehicle' => $vehicle['name'],
+                            'customer' => $location['customer_name']
+                        ]);
+                        $hasSuccess = true;
+                    } else {
+                        // CalDAV Event nicht gefunden - erstelle neuen
+                        $this->logger->warning('CalDAV Event nicht gefunden, erstelle neuen', ['event_id' => $eventId]);
+                        
+                        $now = new \DateTime();
+                        $startTime = clone $now;
+                        $startTime->sub(new \DateInterval('PT30M')); // Schätze 30 Min vorher als Start
+                        $endTime = $now;
+                        
+                        $icalContent = $this->generateICalContentWithTimes($eventId, $vehicle, $location, $distance, $startTime, $endTime);
+                        $this->createCalDavEvent($eventId, $icalContent);
+                        
+                        $this->logger->info('CalDAV Event als neuer Event erstellt (Fallback)', ['event_id' => $eventId]);
+                        $hasSuccess = true;
+                    }
+                } catch (\Exception $caldavError) {
+                    $hasErrors = true;
+                    $errors['caldav'] = $caldavError->getMessage();
+                    $this->logger->error('Fehler beim CalDAV Update', [
+                        'event_id' => $eventId,
+                        'error' => $caldavError->getMessage()
+                    ]);
+                }
+            }
+            
+            // **GOOGLE CALENDAR UPDATE** (falls Google Calendar aktiviert ist)
+            if ($this->config->get('calendar.google_calendar.enabled', false) && $this->googleCalendarService) {
+                try {
+                    $this->logger->debug('Versuche Google Calendar Event zu aktualisieren', ['event_id' => $eventId]);
+                    
+                    // Für Google Calendar: Versuche Event zu finden und aktualisieren
+                    $calendarId = $this->config->get('calendar.google_calendar.calendar_id');
+                    
+                    try {
+                        // Versuche Event zu finden
+                        $existingGoogleEvent = $this->googleCalendarService->events->get($calendarId, $eventId);
+                        
+                        // Event gefunden - aktualisiere es
+                        $existingGoogleEvent->setEnd(new EventDateTime([
+                            'dateTime' => (new \DateTime())->format('c'),
+                            'timeZone' => $this->config->get('settings.timezone', 'Europe/Berlin')
+                        ]));
+                        
+                        $this->googleCalendarService->events->update($calendarId, $eventId, $existingGoogleEvent);
+                        
+                        $this->logger->info('Google Calendar Event erfolgreich aktualisiert', [
+                            'event_id' => $eventId,
+                            'vehicle' => $vehicle['name'],
+                            'customer' => $location['customer_name']
+                        ]);
+                        $hasSuccess = true;
+                        
+                    } catch (\Google\Service\Exception $notFoundError) {
+                        if ($notFoundError->getCode() === 404) {
+                            // Event nicht gefunden - erstelle neuen Google Calendar Event
+                            $this->logger->warning('Google Calendar Event nicht gefunden, erstelle neuen', [
+                                'event_id' => $eventId,
+                                'error' => $notFoundError->getMessage()
+                            ]);
+                            
+                            $now = new \DateTime();
+                            $startTime = clone $now;
+                            $startTime->sub(new \DateInterval('PT30M')); // Schätze 30 Min vorher
+                            
+                            $this->createHistoricalGoogleCalendarEvent($vehicle, $location, $distance, $startTime, $now, false);
+                            
+                            $this->logger->info('Google Calendar Event als neuer Event erstellt (Fallback)', ['event_id' => $eventId]);
+                            $hasSuccess = true;
+                        } else {
+                            throw $notFoundError;
+                        }
+                    }
+                } catch (\Exception $googleError) {
+                    $hasErrors = true;
+                    $errors['google'] = $googleError->getMessage();
+                    $this->logger->error('Fehler beim Google Calendar Update', [
+                        'event_id' => $eventId,
+                        'error' => $googleError->getMessage()
+                    ]);
+                }
+            }
+            
+            // Endergebnis auswerten
+            if ($hasSuccess) {
+                $this->logger->info('Kalendereintrag Update abgeschlossen', [
+                    'event_id' => $eventId,
+                    'vehicle' => $vehicle['name'],
+                    'customer' => $location['customer_name'],
+                    'had_errors' => $hasErrors,
+                    'errors' => $errors
+                ]);
+                return true;
+            } else {
+                $errorMessage = 'Keiner der Kalender konnte aktualisiert werden: ' . implode(', ', $errors);
+                throw new \Exception($errorMessage);
+            }
 
         } catch (\Exception $e) {
             $this->logger->error('Fehler beim Aktualisieren des Kalendereintrags', [
@@ -1169,7 +1283,20 @@ class CalendarService
 
             // Stelle sicher, dass eventId die .ics Endung hat
             $eventPath = str_ends_with($eventId, '.ics') ? $eventId : $eventId . '.ics';
+            
+            // Debug-Logging
+            $this->logger->debug('Versuche Event zu laden', [
+                'original_event_id' => $eventId,
+                'event_path' => $eventPath
+            ]);
+            
             $response = $this->davClient->request('GET', $eventPath);
+            
+            $this->logger->debug('CalDAV Response erhalten', [
+                'status_code' => $response['statusCode'],
+                'event_path' => $eventPath,
+                'body_length' => strlen($response['body'] ?? '')
+            ]);
             
             if ($response['statusCode'] === 200) {
                 $icalContent = $response['body'];
@@ -1178,12 +1305,29 @@ class CalendarService
                 if (preg_match('/DTSTART;TZID=.*?:(\d{8}T\d{6})/', $icalContent, $matches)) {
                     $startTime = \DateTime::createFromFormat('Ymd\THis', $matches[1]);
                     
+                    $this->logger->debug('Event erfolgreich geladen und geparst', [
+                        'event_id' => $eventId,
+                        'start_time' => $startTime->format('Y-m-d H:i:s')
+                    ]);
+                    
                     return [
                         'event_id' => $eventId,
                         'start_time' => $startTime,
                         'ical_content' => $icalContent
                     ];
+                } else {
+                    $this->logger->warning('Konnte DTSTART nicht aus iCal parsen', [
+                        'event_id' => $eventId,
+                        'ical_content_preview' => substr($icalContent, 0, 200)
+                    ]);
                 }
+            } else {
+                $this->logger->warning('Event nicht gefunden oder Fehler beim Laden', [
+                    'event_id' => $eventId,
+                    'event_path' => $eventPath,
+                    'status_code' => $response['statusCode'],
+                    'status_text' => $response['statusText'] ?? 'Unknown'
+                ]);
             }
             
             return null;
