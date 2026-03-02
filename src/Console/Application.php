@@ -14,6 +14,7 @@ use PajGpsCalendar\Console\Commands\ConfigWizardCommand;
 use PajGpsCalendar\Console\Commands\SyncCrmToPajCommand;
 use PajGpsCalendar\Console\Commands\GoogleAuthCommand;
 use PajGpsCalendar\Console\Commands\MonitorVisitsCommand;
+use PajGpsCalendar\Console\Commands\RepairCommand;
 
 class Application extends BaseApplication
 {
@@ -24,12 +25,13 @@ class Application extends BaseApplication
         // Hauptkommandos
         $this->add(new CheckCommand());
         $this->add(new HistoryCommand());
+        $this->add(new RepairCommand());
         $this->add(new SetupCommand());
         
         // Test- und Diagnose-Kommandos
         $this->add(new TestPajCommand());
         $this->add(new TestCrmCommand());
-        $this->add(new TestCalendarCommand());
+        $this->add(command: new TestCalendarCommand());
         $this->add(new AnalyzeCrmCommand());
         
         // Synchronisation und Monitoring

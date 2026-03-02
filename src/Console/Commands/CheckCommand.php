@@ -163,44 +163,49 @@ class CheckCommand extends Command
                         continue;
                     }
                     
-                    // ✨ VERBESSERTE BESUCHSERKENNUNG mit intelligenter StopDuration
+                    // Besuch nur erkennen wenn Fahrzeug vollständig steht:
+                    // - Geschwindigkeit < 1 km/h (nur GPS-Rauschen toleriert)
+                    // - Stopp-Dauer >= Mindestwert aus Konfiguration
                     $shouldCreateEntry = false;
                     $reason = '';
 
-                    // 1. Haupt-Kriterium: Mindestaufenthaltsdauer erreicht
-                    if ($stopDuration >= 1 && $speed < 2) {
+                    if ($speed < 1 && $stopDuration >= $minimumVisitDuration) {
                         $shouldCreateEntry = true;
                         $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, %.1f km/h', $stopDuration, $speed);
-                    }
-                    // 2. Längerer Stopp mit geringer Bewegung (GPS-Drift erlaubt)
-                    else if ($stopDuration >= 3 && $speed < 5) {
-                        $shouldCreateEntry = true;
-                        $reason = sprintf('✅ Besuch erkannt: %d Min gestanden, geringe Bewegung (%.1f km/h)', $stopDuration, $speed);
-                    }
-                    // 3. Sehr langer Stopp - definitiv ein Besuch
-                    else if ($stopDuration >= 10) {
-                        $shouldCreateEntry = true;
-                        $reason = sprintf('✅ Besuch erkannt: Sehr langer Aufenthalt (%d Min)', $stopDuration);
-                    }
-                    // 4. Kriterien noch nicht erfüllt - warten
-                    else {
-                        $reason = sprintf('⏱️ Warte noch: %d Min gestanden (braucht 1 Min), %.1f km/h',
-                            $stopDuration, $speed
+                    } else {
+                        $reason = sprintf('⏱️ Warte noch: %d/%d Min, %.1f km/h (braucht 0 km/h und %d Min)',
+                            $stopDuration, $minimumVisitDuration, $speed, $minimumVisitDuration
                         );
                     }
-                    
+
                     $output->writeln(sprintf('    🎯 Entscheidung: %s', $reason));
-                    
-                    // Prüfe ob bereits ein Kalendereintrag existiert
-                    $hasExistingEntry = $calendar->hasRecentEntry($vehicle, $customer);
-                    
+
+                    // Ankunftszeit = letzter PAJ-Timestamp minus bisherige Stopp-Dauer
+                    $visitTimestamp = ($vehicle['timestamp'] ?? time()) - (int)($stopDuration * 60);
+
+                    // GPS-Drift-Schutz: prüfe alle Kunden in der Nähe, nicht nur den nächsten.
+                    // Wenn das Fahrzeug zwischen zwei nahen Kunden steht und GPS leicht driftet,
+                    // kann sich der "nächste" Kunde von Besuch zu Besuch ändern. Durch Prüfung
+                    // aller nahegelegenen Kunden im selben Stundenblock wird verhindert, dass
+                    // ein bereits erstellter Eintrag (z.B. für Kunde A) durch GPS-Drift einen
+                    // zweiten Eintrag für Kunde B erzeugt.
+                    $hasExistingEntry = false;
+                    $existingAtCustomer = null;
+                    foreach ($nearbyCustomers as $nearbyCustomer) {
+                        if ($calendar->hasRecentEntry($vehicle, $nearbyCustomer, $visitTimestamp)) {
+                            $hasExistingEntry = true;
+                            $existingAtCustomer = $nearbyCustomer;
+                            break;
+                        }
+                    }
+
                     // Nur Kalendereintrag erstellen wenn:
                     // 1. Besuchskriterien erfüllt
                     // 2. Noch kein Eintrag im Kalender für diesen Besuch
                     if ($shouldCreateEntry && !$hasExistingEntry) {
-                        
+
                         if (!$dryRun) {
-                            if ($calendar->createEntry($vehicle, $customer, $customer['distance_meters'])) {
+                            if ($calendar->createEntry($vehicle, $customer, $customer['distance_meters'], $visitTimestamp)) {
                                 $entriesCreated++;
                                 $output->writeln('    ✅ Kalendereintrag erstellt');
                             } else {
@@ -210,7 +215,16 @@ class CheckCommand extends Command
                             $output->writeln('    📅 Kalendereintrag würde erstellt werden (Dry-Run)');
                         }
                     } else if ($shouldCreateEntry && $hasExistingEntry) {
-                        $output->writeln('    ⏭️  Besuch bereits im Kalender - überspringe');
+                        if ($existingAtCustomer !== null
+                            && ($existingAtCustomer['customer_id'] ?? '') !== ($customer['customer_id'] ?? '')) {
+                            $output->writeln(sprintf(
+                                '    ⏭️  GPS-Drift erkannt: Eintrag bereits bei "%s" (%.0fm) vorhanden - überspringe',
+                                $existingAtCustomer['customer_name'],
+                                $existingAtCustomer['distance_meters']
+                            ));
+                        } else {
+                            $output->writeln('    ⏭️  Besuch bereits im Kalender - überspringe');
+                        }
                     } else {
                         $output->writeln('    ⏱️  Besuchskriterien noch nicht erfüllt');
                     }
@@ -219,20 +233,25 @@ class CheckCommand extends Command
                 // Prüfe beendete Besuche: Fahrzeuge die heute Events haben aber nicht mehr in der Nähe sind
                 $todaysEvents = $calendar->getTodaysEventsForVehicle($vehicle['id']);
                 foreach ($todaysEvents as $event) {
-                    // Prüfe ob Event noch einem aktuellen Besuch entspricht
+                    // Prüfe ob Event noch einem aktuellen Besuch entspricht.
+                    // Use prefix matching: paj-gps-{vehicleId}-{customerId}-{YYYYMMDD}
+                    // (the hour part may differ if the visit spans an hour boundary)
                     $eventStillActive = false;
+                    $vehicleIdClean   = preg_replace('/[^a-zA-Z0-9]/', '', $vehicle['id']);
+                    $today            = date('Ymd');
                     foreach ($nearbyCustomers as $customer) {
-                        $expectedEventId = $calendar->generateEventId($vehicle, $customer);
-                        if ($event['event_id'] === $expectedEventId) {
+                        $customerIdClean = preg_replace('/[^a-zA-Z0-9]/', '', $customer['customer_id'] ?? '');
+                        $expectedPrefix  = "paj-gps-{$vehicleIdClean}-{$customerIdClean}-{$today}";
+                        if (strpos($event['event_id'], $expectedPrefix) === 0) {
                             $eventStillActive = true;
                             break;
                         }
                     }
-                    
+
                     // Event existiert, aber Fahrzeug ist nicht mehr in der Nähe → Update mit Endzeit
                     if (!$eventStillActive && !$dryRun) {
-                        // Parse Kunden-ID aus Event-ID
-                        if (preg_match('/paj-gps-.*?-(.+?)-[a-f0-9]+$/', $event['event_id'], $matches)) {
+                        // Parse Kunden-ID aus Event-ID: paj-gps-{vehicleId}-{customerId}-{YYYYMMDD}-{H}
+                        if (preg_match('/^paj-gps-[a-zA-Z0-9]+-([a-zA-Z0-9]+)-\d{8}-\d{1,2}$/', $event['event_id'], $matches)) {
                             $customerId = $matches[1];
                             $customer = $crm->getCustomerById($customerId);
                             if ($customer) {

@@ -1136,11 +1136,11 @@ class PajApiService
                 
                 $timeGapMinutes = ($timestamp - $currentStay['end_time']) / 60;
                 
-                if (!$isMoving && $distance <= $maxMovementRadius && $timeGapMinutes <= 60) {
+                if (!$isMoving && $distance <= $maxMovementRadius && $timeGapMinutes <= 120) {
                     // Punkt gehört zum aktuellen Aufenthalt
                     $currentStay['end_time'] = $timestamp;
                     $currentStay['points'][] = $point;
-                    
+
                     // Zentrum neu berechnen (gewichteter Durchschnitt)
                     $totalLat = 0;
                     $totalLon = 0;
@@ -1153,7 +1153,34 @@ class PajApiService
                 } else {
                     // Aufenthalt beendet - Prüfe ob lang genug für Besuch
                     $durationMinutes = ($currentStay['end_time'] - $currentStay['start_time']) / 60;
-                    
+
+                    // PAJ-Schlafmodus-Erkennung: Wenn der Aufenthalt zu kurz erscheint,
+                    // prüfe ob die Zeitlücke zum nächsten Punkt groß genug ist.
+                    // PAJ sendet oft nur 1 Punkt beim Parken (speed=0), dann nichts bis zum Losfahren.
+                    // Wichtig: Nur bei speed=0 am Startpunkt – speed=1-4 deutet auf Ampel/Stau hin,
+                    // nicht auf echtes Parken.
+                    // Für PAJ-Schlafmodus: Mindestlücke ist max(4 Min, Mindestdauer), damit
+                    // kurze Haltepunkte (Ampel, 2-min-Halt) nicht fälschlich erkannt werden.
+                    $sleepModeMinGap = max(4, $minimumStopDurationMinutes);
+                    $startSpeed = (float)(($currentStay['points'][0] ?? [])['speed'] ?? $maxSpeedKmh + 1);
+                    if ($durationMinutes < $minimumStopDurationMinutes && $startSpeed < 1) {
+                        $gapToCurrentMinutes = ($timestamp - $currentStay['end_time']) / 60;
+                        $distanceFromCenter = $this->calculateDistance(
+                            $currentStay['center_lat'], $currentStay['center_lon'],
+                            $latitude, $longitude
+                        );
+                        // Zeitlücke >= Mindest-Gap UND Position kaum verändert = PAJ-Schlafmodus-Stopp
+                        if ($gapToCurrentMinutes >= $sleepModeMinGap && $distanceFromCenter <= 200) {
+                            $currentStay['end_time'] = $timestamp;
+                            $durationMinutes = $gapToCurrentMinutes;
+                            $this->logger->debug('PAJ-Schlafmodus-Stopp erkannt', [
+                                'gap_minutes' => round($gapToCurrentMinutes, 1),
+                                'distance_meters' => round($distanceFromCenter, 1),
+                                'center' => round($currentStay['center_lat'], 5) . ',' . round($currentStay['center_lon'], 5)
+                            ]);
+                        }
+                    }
+
                     if ($durationMinutes >= $minimumStopDurationMinutes) {
                         $visits[] = [
                             'device_id' => $deviceId,
